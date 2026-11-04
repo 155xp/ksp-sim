@@ -295,6 +295,131 @@ fn point_mass_tables<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
     Ok(d)
 }
 
+/// CUDA tick inputs: (packed constants f64, C header with index macros).
+#[pyfunction]
+fn gpu_pack<'py>(py: Python<'py>) -> PyResult<PyObject> {
+    let spec = VesselSpec::compile(&Craft::hopper());
+    let p = ksp_core::gpu::pack(&spec, &Params::default());
+    Ok((PyArray1::from_vec(py, p.data), p.header).into_pyobject(py)?.into_any().unbind())
+}
+
+/// Terrain heightfield for the device: (meta f64, alt f32, ground u8) or None.
+#[pyfunction]
+fn gpu_terrain<'py>(py: Python<'py>) -> PyResult<PyObject> {
+    match ksp_core::gpu::terrain_arrays() {
+        Some((m, a, g)) => Ok((PyArray1::from_vec(py, m), PyArray1::from_vec(py, a), PyArray1::from_vec(py, g)).into_pyobject(py)?.into_any().unbind()),
+        None => Ok(py.None()),
+    }
+}
+
+/// Packed initial states (N, STATE_FIELDS) from the task reset distribution (seeded).
+#[pyfunction]
+#[pyo3(signature = (n, seed = 0, **kwargs))]
+fn gpu_reset_states<'py>(py: Python<'py>, n: usize, seed: u64, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let (cfg, _) = task_from_kwargs(kwargs)?;
+    let spec = VesselSpec::compile(&Craft::hopper());
+    let nf = ksp_core::gpu::STATE_FIELDS;
+    let mut out = vec![0.0; n * nf];
+    for i in 0..n {
+        let mut rng = seed ^ (i as u64).wrapping_mul(0xA24BAED4963EE407);
+        let st = ksp_core::batch::sample_reset(&spec, &cfg, &mut rng);
+        ksp_core::gpu::pack_state(&st, &mut out[i * nf..(i + 1) * nf]);
+    }
+    Ok(PyArray1::from_vec(py, out).reshape([n, nf])?)
+}
+
+/// Step packed states (N, STATE_FIELDS) on the CPU with sim::tick (reference for GPU parity).
+#[pyfunction]
+fn cpu_step_packed<'py>(py: Python<'py>, states: PyReadonlyArray2<'py, f64>, actions: PyReadonlyArray2<'py, f32>, substeps: usize) -> PyResult<Bound<'py, PyArray2<f64>>> {
+    let spec = VesselSpec::compile(&Craft::hopper());
+    let prm = Params::default();
+    let a = states.as_array();
+    let u = actions.as_array();
+    let (n, nf) = (a.shape()[0], a.shape()[1]);
+    let mut out = vec![0.0; n * nf];
+    for i in 0..n {
+        let row: Vec<f64> = a.row(i).to_vec();
+        let mut st = ksp_core::gpu::unpack_state(&row);
+        let ctl = sim::Control { throttle: u[[i, 0]] as f64, pitch: u[[i, 1]] as f64, yaw: u[[i, 2]] as f64, roll: u[[i, 3]] as f64 };
+        for _ in 0..substeps {
+            if st.status == sim::STATUS_CRASHED {
+                break;
+            }
+            sim::tick(&spec, &prm, &mut st, &ctl);
+        }
+        ksp_core::gpu::pack_state(&st, &mut out[i * nf..(i + 1) * nf]);
+    }
+    Ok(PyArray1::from_vec(py, out).reshape([n, nf])?)
+}
+
+/// GPU replay of an in-game trace (regression test of the GPU kernels against the game).
+/// Returns (pack data, pack header, states (R, STATE_FIELDS) seeded from rows i, actions (R, 4),
+/// rows i) for every row with a successor; the pack is built from the trace's own vessel.
+#[pyfunction]
+fn trace_gpu_cases<'py>(py: Python<'py>, dir: &str, name: &str) -> PyResult<PyObject> {
+    let t = ksp_core::trace::Trace::load(std::path::Path::new(dir), name).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let spec = t.spec();
+    let p = ksp_core::gpu::pack(&spec, &Params::default());
+    let nf = ksp_core::gpu::STATE_FIELDS;
+    let rows: Vec<usize> = (sim::VEL_SMOOTH_LEN..t.csv.n - 1).collect();
+    let mut st_out = vec![0.0; rows.len() * nf];
+    let mut act = vec![0f32; rows.len() * 4];
+    for (j, &i) in rows.iter().enumerate() {
+        let st = ksp_core::trace::state_at(&t, &spec, i);
+        ksp_core::gpu::pack_state(&st, &mut st_out[j * nf..(j + 1) * nf]);
+        let c = ksp_core::trace::control(&t, i);
+        act[4 * j..4 * j + 4].copy_from_slice(&[c.throttle as f32, c.pitch as f32, c.yaw as f32, c.roll as f32]);
+    }
+    let r = rows.len();
+    let out = (
+        PyArray1::from_vec(py, p.data),
+        p.header,
+        PyArray1::from_vec(py, st_out).reshape([r, nf])?,
+        PyArray1::from_vec(py, act).reshape([r, 4])?,
+        PyArray1::from_vec(py, rows.iter().map(|&i| i as u64).collect::<Vec<_>>()),
+    );
+    Ok(out.into_pyobject(py)?.into_any().unbind())
+}
+
+/// One-step errors against the game for states stepped one tick from trace rows `rows`:
+/// (CoM acceleration error m/s^2, angular acceleration error rad/s^2, any-wheel-grounded flag),
+/// for the given stepped states and for the CPU tick from the same seeds.
+#[pyfunction]
+fn trace_one_step_errors<'py>(py: Python<'py>, dir: &str, name: &str, stepped: PyReadonlyArray2<'py, f64>, rows: PyReadonlyArray1<'py, u64>) -> PyResult<PyObject> {
+    let t = ksp_core::trace::Trace::load(std::path::Path::new(dir), name).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let spec = t.spec();
+    let prm = Params::default();
+    let c = &t.csv;
+    let a = stepped.as_array();
+    let rows = rows.as_slice()?;
+    let nw = (0..8).filter(|k| c.has(&format!("wc{k}_grounded"))).count();
+    let (mut ga, mut gw, mut ca, mut cw, mut gr) = (vec![], vec![], vec![], vec![], vec![]);
+    let dt = sim::FIXED_DT;
+    for (j, &i) in rows.iter().enumerate() {
+        let i = i as usize;
+        let vg = c.v("vsrf", i + 1);
+        let wg = -c.v("w", i + 1);
+        let st = ksp_core::gpu::unpack_state(&a.row(j).to_vec());
+        let (_, v) = ksp_core::trace::com_state(&spec, &st);
+        ga.push((v - vg).norm() / dt);
+        gw.push((st.w - wg).norm() / dt);
+        let mut sc = ksp_core::trace::state_at(&t, &spec, i);
+        sim::tick(&spec, &prm, &mut sc, &ksp_core::trace::control(&t, i));
+        let (_, v) = ksp_core::trace::com_state(&spec, &sc);
+        ca.push((v - vg).norm() / dt);
+        cw.push((sc.w - wg).norm() / dt);
+        gr.push((0..nw).any(|k| c.c(&format!("wc{k}_grounded"))[i] > 0.5 || c.c(&format!("wc{k}_grounded"))[i + 1] > 0.5));
+    }
+    let out = (
+        PyArray1::from_vec(py, ga),
+        PyArray1::from_vec(py, gw),
+        PyArray1::from_vec(py, ca),
+        PyArray1::from_vec(py, cw),
+        PyArray1::from_vec(py, gr),
+    );
+    Ok(out.into_pyobject(py)?.into_any().unbind())
+}
+
 #[pymodule]
 fn _ksp_sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<VecEnv>()?;
@@ -303,6 +428,12 @@ fn _ksp_sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hopper_info, m)?)?;
     m.add_function(wrap_pyfunction!(hopper_drop, m)?)?;
     m.add_function(wrap_pyfunction!(point_mass_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_pack, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_terrain, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_reset_states, m)?)?;
+    m.add_function(wrap_pyfunction!(cpu_step_packed, m)?)?;
+    m.add_function(wrap_pyfunction!(trace_gpu_cases, m)?)?;
+    m.add_function(wrap_pyfunction!(trace_one_step_errors, m)?)?;
     m.add("OBS_DIM", OBS_DIM)?;
     m.add("ACT_DIM", ACT_DIM)?;
     m.add("FIXED_DT", sim::FIXED_DT)?;

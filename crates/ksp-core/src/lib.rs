@@ -6,6 +6,7 @@ pub mod bodies_data;
 pub mod body;
 pub mod cfg;
 pub mod curve;
+pub mod gpu;
 pub mod engine;
 pub mod ksc;
 pub mod math;

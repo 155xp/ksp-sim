@@ -10,7 +10,7 @@ traces`) passing within their bounds; speed changes that alter physics are not a
 How to reproduce:
 - single-thread tick ablation: `taskset -c 0 target/release/examples/profile_tick`
 - batched stepping (Rust, 1 physics tick per env-step): `cargo run --release -p ksp-core --example bench`
-- Python API: `.venv/bin/python bench/bench_py.py`; GPU: `bench/bench_cuda.py`
+- Python API: `.venv/bin/python bench/bench_py.py`; GPU point-mass: `bench/bench_cuda.py`; GPU full tick: `bench/bench_cuda_full.py`
 
 ## History
 
@@ -28,3 +28,26 @@ Notes:
 - 65 536 envs at 1 tick/step are memory-bound on the SoA gather/scatter (EnvState with leg and
   smoother state is ~0.9 KB); with the RL default of 5 ticks per step the throughput per tick is
   higher (see bench_py.py).
+
+## GPU full tick (RTX 4060 Ti, `bench/bench_cuda_full.py`)
+
+One thread per env, field-major state in device memory, the whole sim::tick per thread (engines,
+gimbal, reaction wheel, drag cubes and body lift per part, gravity and rotating-frame terms, leg
+suspension chain, terrain rays, hull impulse contacts, gyroscopics). Physics ticks/s, hover/landing
+reset distribution, random actions. CPU reference: 14.1 M env-ticks/s at 65 536 envs (#4 above).
+
+| # | change | ticks/s at 65 536 / 1 048 576 envs (5 ticks per launch) | vs CPU 64k |
+|---|---|---|---|
+| G1 | f64 port, per-thread local copy of the state | 31.8 M / 35.9 M | 2.5x |
+| G2 | direct field-major global addressing (no local state copy) | 31.8 M / 35.9 M | 2.5x |
+| G3 | mass properties from a linear-in-resources basis; per-part aero in the root frame (one rotation in/out) | 36.3 M / 41.0 M | 2.9x |
+| G4 | mixed precision kernel (`precision="mixed"`, default): double where KSP keeps double (CoM position/velocity, gravity, altitude, resources, attitude accumulation), float where Unity/PhysX use float | 217 M / 235 M | 16.7x |
+
+Notes:
+- The 4060 Ti runs f64 at 1/64 of the f32 rate; register caps (64..168) and block sizes did not
+  change G3's throughput, so it was f64-ALU bound. G4 is ~5.7x G3.
+- Ablation at G4 (262 144 envs): no aero 338 M, no ground 287 M, neither 455 M ticks/s.
+- Accuracy gate for G4 (tests/test_cuda_parity.py): every in-game trace row re-seeded as one env
+  and stepped once on the GPU; the one-step error against the game equals the CPU's to 3
+  significant figures (median and p95, airborne and in contact, 7 traces). Against the CPU: 5 ticks
+  <= 1.3e-6 m, 50 ticks <= 6e-6 m; the f64 kernel matches the CPU to 1e-9 m.

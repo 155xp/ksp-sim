@@ -58,3 +58,63 @@ def test_point_mass_matches_full_sim_vertical_drop():
     # first 4 s: the 6-DOF hopper (lift at CoL, composite gyroscopics) starts to rotate later on
     assert err[:200].max() < 0.1
     del tbl
+
+
+# ---- full 6-DOF tick kernels (cuda_full.GpuTick) vs the CPU core and vs the in-game traces ----
+import os
+from pathlib import Path
+
+from ksp_sim._ksp_sim import cpu_step_packed, gpu_reset_states
+
+
+def _step_both(prec, n, seed, launches):
+    from ksp_sim.cuda_full import GpuTick
+
+    s0 = gpu_reset_states(n, seed)
+    rng = np.random.default_rng(seed)
+    act = np.c_[rng.uniform(0.2, 0.9, n), rng.uniform(-0.3, 0.3, (n, 3))].astype(np.float32)
+    g = GpuTick(s0, precision=prec)
+    sc = s0.copy()
+    for _ in range(launches):
+        g.step(act, 5)
+        sc = cpu_step_packed(sc, act, 5)
+    sg = g.states()
+    return np.linalg.norm(sg[:, 1:4] - sc[:, 1:4], axis=1), np.linalg.norm(sg[:, 4:7] - sc[:, 4:7], axis=1)
+
+
+@pytest.mark.parametrize("prec, tol5, tol50", [("f64", (1e-8, 1e-7), (1e-6, 1e-6)), ("mixed", (1e-5, 1e-5), (1e-4, 2e-4))])
+def test_full_tick_matches_cpu(prec, tol5, tol50):
+    # reset distribution (hover / landing starts incl. leg contact), 5 and 50 ticks
+    for launches, (tp, tv) in ((1, tol5), (10, tol50)):
+        dx, dv = _step_both(prec, 512, 3, launches)
+        print(f"{prec}: {5 * launches} ticks, GPU vs CPU pos max {dx.max():.2e} m, vel max {dv.max():.2e} m/s")
+        assert dx.max() < tp and dv.max() < tv
+
+
+_TRACES = Path(os.environ.get("KSP_SIM_TRACES", Path(__file__).resolve().parents[1] / "data" / "traces"))
+_TRACE_CASES = [("v2", "Ascent80"), ("v2", "HopperHover"), ("v2", "HopperSuicide"), ("v2", "HopperDrop2"), ("v2", "HopperHop"),
+                ("v3", "HopperSuicide"), ("v6", "HopperPadLand")]
+
+
+@pytest.mark.parametrize("prec", ["f64", "mixed"])
+@pytest.mark.parametrize("batch, name", _TRACE_CASES)
+def test_full_tick_vs_game_traces(prec, batch, name):
+    """Every logged tick re-seeded as one env and stepped once on the GPU: the error against the
+    game must equal the CPU tick's (the GPU precision is invisible next to the sim-vs-game error)."""
+    from ksp_sim._ksp_sim import trace_gpu_cases, trace_one_step_errors
+    from ksp_sim.cuda_full import GpuTick
+
+    d = _TRACES / batch
+    if not (d / f"{name}.csv").exists():
+        pytest.skip("no trace data")
+    data, hdr, st, act, rows = trace_gpu_cases(str(d), name)
+    g = GpuTick(st, precision=prec, pack=(data, hdr))
+    g.step(act, 1)
+    ga, gw, ca, cw, gr = trace_one_step_errors(str(d), name, g.states(), rows)
+    for m in (~gr, gr):
+        if m.sum() < 50:
+            continue
+        for gpu, cpu in ((ga, ca), (gw, cw)):
+            for q in (50, 95):
+                a, b = np.percentile(gpu[m], q), np.percentile(cpu[m], q)
+                assert a <= b * 1.02 + 1e-5, (name, q, a, b)
