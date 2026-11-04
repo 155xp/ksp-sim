@@ -234,11 +234,12 @@ pub fn observe(spec: &VesselSpec, prm: &Params, st: &EnvState, mach: f32, qkpa: 
     let mut low = f64::INFINITY;
     for k in 0..spec.n_legs as usize {
         let p = st.x + st.q.rotate(spec.legs[k].foot());
-        low = low.min(p.norm() - ground_r);
+        low = low.min(sim::ground_height(prm, p));
     }
     if spec.n_legs == 0 {
-        low = x_com.norm() - ground_r;
+        low = sim::ground_height(prm, x_com);
     }
+    let _ = ground_r;
     let fuel = if spec.res_cap_total[0] > 0.0 { st.res[0] / spec.res_cap_total[0] } else { 0.0 };
     let (m, _, _) = spec.mass_props(&st.res);
     let legs = {

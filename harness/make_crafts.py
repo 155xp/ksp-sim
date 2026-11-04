@@ -123,7 +123,7 @@ def main(out):
     links = {0: [1], 1: [2, 3, 4, 5]}
     attn = {0: [("bottom", 1)], 1: [("top", 0), ("bottom", 2)], 2: [("top", 1)]}
     srfn = {3: 1, 4: 1, 5: 1}
-    for ship in ["HopperDrop", "HopperDrop2", "HopperHover", "HopperHop", "HopperSuicide"]:
+    for ship in ["HopperDrop", "HopperDrop2", "HopperHover", "HopperHop", "HopperSuicide", "HopperPadLand", "Survey"]:
         write(f"{out}/{ship}.craft", ship, hp, links, attn, srfn, 2)
     # ascent: pod / FL-T800 / FL-T800 / Swivel
     asc = stack(["mk1pod_v2", "fuelTank_long", "fuelTank_long", "liquidEngine2_v2"])

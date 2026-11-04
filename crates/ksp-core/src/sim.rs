@@ -114,20 +114,59 @@ pub struct Params {
     pub drift_compensation: bool,
     pub aero: bool,
     pub ground: bool,
+    /// use the surveyed KSC collision heightfield (terrain.rs) when available; else the sphere
+    pub terrain: bool,
+    /// destroy the vessel on impacts above a part's crashTolerance
+    pub crash: bool,
 }
 
 impl Default for Params {
     fn default() -> Self {
         Params {
             body: KERBIN,
-            ground_alt: ksc::KSC_PAD_DECK_ALT,
+            ground_alt: ksc::KSC_PAD_DECK_ALT_GAME,
             friction: 1.0,
             sun_temperature: true,
             drift_compensation: true,
             aero: true,
             ground: true,
+            terrain: true,
+            crash: true,
         }
     }
+}
+
+/// Ground ray `a - s u`, s in [0, len]: (s, hit point, outward normal).
+#[inline]
+pub fn ground_ray(prm: &Params, a: V3, u: V3, len: f64) -> Option<(f64, V3, V3)> {
+    if prm.terrain {
+        if let Some(t) = crate::terrain::ksc() {
+            return t.ray(a, u, len);
+        }
+    }
+    let rg = prm.body.radius + prm.ground_alt;
+    let au = a.dot(u);
+    let disc = au * au - (a.norm2() - rg * rg);
+    if disc < 0.0 {
+        return None;
+    }
+    let s = au - disc.sqrt();
+    if s < 0.0 || s > len {
+        return None;
+    }
+    let p = a - u * s;
+    Some((s, p, p.normalized()))
+}
+
+/// Height of body-fixed point `p` above the ground (negative = below).
+#[inline]
+pub fn ground_height(prm: &Params, p: V3) -> f64 {
+    if prm.terrain {
+        if let Some(t) = crate::terrain::ksc() {
+            return t.height_above(p);
+        }
+    }
+    p.norm() - prm.body.radius - prm.ground_alt
 }
 
 #[inline(always)]
@@ -253,6 +292,97 @@ fn inv3(m: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
         [co[1] * r, (a * i - c * g) * r, -(a * f - c * d) * r],
         [co[2] * r, -(a * h - b * g) * r, (a * e - b * d) * r],
     ]
+}
+
+const MAX_CONTACTS: usize = 24;
+/// Fraction of the penetration-recovery velocity pen/dt that PhysX's contact solve (50 position
+/// iterations, 1 velocity iteration) leaves in the body. Fitted to the in-game hard stop of trace
+/// HopperSuicide v2 (Swivel bell 12.4 cm into the pad deck -> +3.3 m/s contact rebound).
+pub const DEPEN_VELOCITY_FRACTION: f64 = 0.55;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Contact {
+    /// contact point relative to the CoM, ground normal, signed gap (m, positive = above ground)
+    r: V3,
+    n: V3,
+    gap: f64,
+    crash_tol: f64,
+    break_force: f64,
+    mu: f64,
+}
+
+/// Part-collider friction coefficient on the ground at `p` (see terrain.rs).
+#[inline]
+pub fn ground_friction(prm: &Params, p: V3) -> f64 {
+    match (prm.terrain, crate::terrain::ksc()) {
+        (true, Some(t)) => t.friction_at(p),
+        _ => 0.6,
+    }
+}
+
+/// Outward ground normal at body-fixed point `p`.
+#[inline]
+pub fn ground_normal(prm: &Params, p: V3) -> V3 {
+    match (prm.terrain, crate::terrain::ksc()) {
+        (true, Some(t)) => t.normal_at(p),
+        _ => p.normalized(),
+    }
+}
+
+/// Per-part aerodynamic result of `FlightIntegrator.UpdateAerodynamics` (cube model).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PartAero {
+    /// part.dragScalar (kN) along -dir, dir = unit part velocity relative to the air
+    pub drag: f64,
+    pub dir: V3,
+    /// body lift force (world, kN), already projected perpendicular to dir
+    pub lift: V3,
+    /// part dynamic pressure (kPa)
+    pub q: f64,
+}
+
+/// Drag and body lift of part `i` moving at `vpart` (air-relative, world) with root attitude `q`.
+#[inline]
+pub fn part_aero(spec: &VesselSpec, i: usize, q: Quat, vpart: V3, atm: &atmo::AtmState, mt: &crate::aero::MachTerms) -> PartAero {
+    let s2 = vpart.norm2();
+    if s2 <= 0.0 {
+        return PartAero::default();
+    }
+    let qp = atm.rho * 0.0005 * s2;
+    let vhat = vpart / s2.sqrt();
+    let prot = q * spec.part_rot[i];
+    let d = prot.conj().rotate(vhat);
+    let f = &spec.part_faces[i];
+    let (mut area_drag, mut area, mut lift_l) = (0.0, 0.0, V3::ZERO);
+    for j in 0..6 {
+        let dot = d.dot(FACE_DIRS[j]);
+        let dot01 = (dot + 1.0) * 0.5;
+        let sc = if dot01 <= 0.5 {
+            (mt.tail + (mt.surf - mt.tail) * (2.0 * dot01)) * mt.mult
+        } else {
+            (mt.surf + (mt.tip - mt.surf) * (2.0 * dot01 - 1.0)) * mt.mult
+        };
+        let a = f.area[j] * sc;
+        area += a;
+        let lcd = spec.part_face_ln_cd[i][j];
+        let cd = if lcd.is_nan() { f.drag[j] } else { (mt.cd_pow * lcd).exp() };
+        area_drag += a * cd;
+        if dot > 0.0 && spec.part_body_lift[i] != 0.0 {
+            let l = dot * f.area[j] * f.drag[j] * (eval(BODY_LIFT_CURVE, dot as f32 as f64) as f32 as f64);
+            lift_l -= FACE_DIRS[j] * l;
+        }
+    }
+    if area <= 0.0 {
+        area_drag = 0.0;
+    }
+    let drag = qp * area_drag * DRAG_CUBE_MULTIPLIER * atm.pseudo_re_drag_mult * DRAG_MULTIPLIER;
+    let mut lift = V3::ZERO;
+    if spec.part_body_lift[i] != 0.0 {
+        let bl = qp * spec.part_body_lift[i] * BODY_LIFT_MULTIPLIER * mt.body_lift_mach;
+        let l = prot.rotate(lift_l * bl);
+        lift = l - vhat * l.dot(vhat);
+    }
+    PartAero { drag, dir: vhat, lift, q: qp }
 }
 
 /// Diagnostic outputs of one tick.
@@ -397,45 +527,12 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                     damp_l[a][bb] += ci * mi * spec.part_inertia_root[i][a][bb];
                 }
             }
-            let vhat = vpart / s2.sqrt();
-            let prot = st.q * spec.part_rot[i];
-            let d = prot.conj().rotate(vhat);
-            let f = &spec.part_faces[i];
-            let (mut area_drag, mut area, mut lift_l) = (0.0, 0.0, V3::ZERO);
-            for j in 0..6 {
-                let dot = d.dot(FACE_DIRS[j]);
-                let dot01 = (dot + 1.0) * 0.5;
-                let s = if dot01 <= 0.5 {
-                    (mt.tail + (mt.surf - mt.tail) * (2.0 * dot01)) * mt.mult
-                } else {
-                    (mt.surf + (mt.tip - mt.surf) * (2.0 * dot01 - 1.0)) * mt.mult
-                };
-                let a = f.area[j] * s;
-                area += a;
-                if a == 0.0 {
-                    continue;
-                }
-                let lcd = spec.part_face_ln_cd[i][j];
-                let cd = if lcd.is_nan() { f.drag[j] } else { (mt.cd_pow * lcd).exp() };
-                area_drag += a * cd;
-                if dot > 0.0 && spec.part_body_lift[i] != 0.0 {
-                    let l = dot * f.area[j] * f.drag[j] * (eval(BODY_LIFT_CURVE, dot as f32 as f64) as f32 as f64);
-                    lift_l -= FACE_DIRS[j] * l;
-                }
-            }
-            if area <= 0.0 {
-                area_drag = 0.0;
-            }
-            let drag = qp * area_drag * DRAG_CUBE_MULTIPLIER * atm.pseudo_re_drag_mult * DRAG_MULTIPLIER;
-            let mut fp = vhat * (-drag);
-            if spec.part_body_lift[i] != 0.0 {
-                let bl = qp * spec.part_body_lift[i] * BODY_LIFT_MULTIPLIER * mt.body_lift_mach;
-                let l = prot.rotate(lift_l * bl);
-                fp += l - vhat * l.dot(vhat);
-            }
-            force += fp;
-            let at = st.q.rotate(spec.part_cop[i]);
-            torque += (at - r_com).cross(fp);
+            let pa = part_aero(spec, i, st.q, vpart, &atm, &mt);
+            let fd = pa.dir * (-pa.drag);
+            force += fd + pa.lift;
+            // ApplyAeroDrag at TransformPoint(CoPOffset), ApplyAeroLift at TransformPoint(CoLOffset)
+            torque += (st.q.rotate(spec.part_cop[i]) - r_com).cross(fd);
+            torque += (st.q.rotate(spec.part_col[i]) - r_com).cross(pa.lift);
         }
     }
 
@@ -459,20 +556,14 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         }
         inv3(&iw)
     };
-    // effective mass of the rigid body at lever arm r along unit direction d
-    let m_eff = |r: V3, d: V3| {
-        let rd = r.cross(d);
-        1.0 / (1.0 / m + rd.dot(mat_vec(&iw_inv, rd)))
-    };
-    // PhysX resolves contacts implicitly; with explicit penalty forces every viscous gain is
-    // capped at 0.5 * m_eff / dt so the contact cannot overshoot in one step.
-    let gain_cap = |r: V3, d: V3| 0.5 * m_eff(r, d) / dt;
+
 
     // 6. ground contact (body-fixed ground; only meaningful in the rotating frame)
     let mut legs = 0u32;
     let mut contact_any = false;
+    let mut contacts = [Contact::default(); MAX_CONTACTS];
+    let mut nc = 0usize;
     if prm.ground && rot_frame {
-        let rg = b.radius + prm.ground_alt;
         let g_mag = g.norm();
         let n_grounded = (0..spec.n_legs as usize).filter(|&k| st.legs[k].grounded).count() as u32;
         let inp = wheel::SuspInputs {
@@ -493,14 +584,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
             let a = st.x + st.q.rotate(l.anchor);
             let u = st.q.rotate(l.up);
             let len = l.travel + l.radius;
-            // ray a - s u against the ground sphere |p| = rg
-            let au = a.dot(u);
-            let disc = au * au - (a.norm2() - rg * rg);
-            let s_hit = if disc >= 0.0 { au - disc.sqrt() } else { f64::INFINITY };
-            let hit = s_hit >= 0.0 && s_hit <= len;
-            if hit {
-                let p = a - u * s_hit;
-                let n = p.normalized();
+            if let Some((s_hit, p, n)) = ground_ray(prm, a, u, len) {
                 let ndu = n.dot(u);
                 // VPP tire force from the previous step's load, at the current contact
                 if ls.grounded {
@@ -533,17 +617,6 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 torque += (p - x_com).cross(fc);
                 let vn = (v_com + st.w.cross(p - x_com)).dot(n);
                 st.impact_speed = st.impact_speed.max((-vn) as f32);
-                if x > l.travel {
-                    // piston bottomed out (piston collider): hard stop, leg breaks on a hard hit
-                    let pen = x - l.travel;
-                    let me = m_eff(p - x_com, n);
-                    let fh = (0.1 * me / (dt * dt) * pen - gain_cap(p - x_com, n) * vn).max(0.0);
-                    force += n * fh;
-                    torque += (p - x_com).cross(n * fh);
-                    if -vn > l.crash_tolerance {
-                        st.status = STATUS_CRASHED;
-                    }
-                }
                 ls.grounded = true;
                 ls.x = x as f32;
                 ls.hit_force = reported as f32;
@@ -556,34 +629,17 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 ls.tire = [0.0, 0.0];
             }
         }
+        // rigid contacts (part colliders) for the PhysX solver below
+        // PhysX generates contacts for shapes within contactOffset (Unity default 0.01 m) at the
+        // start of the step; deeper penetration is recovered over later steps
+        let reach = 0.01;
         for k in 0..spec.n_hull as usize {
             let p = st.x + st.q.rotate(spec.hull[k]);
-            let pen = rg - p.norm();
-            if pen <= 0.0 {
-                continue;
+            let gap = ground_height(prm, p);
+            if gap < reach && nc < MAX_CONTACTS {
+                contacts[nc] = Contact { r: p - x_com, n: ground_normal(prm, p), gap, crash_tol: spec.hull_tolerance[k], break_force: spec.hull_break_force[k], mu: ground_friction(prm, p) };
+                nc += 1;
             }
-            contact_any = true;
-            let n = p.normalized();
-            let vp = v_com + st.w.cross(p - x_com);
-            let vn = vp.dot(n);
-            st.impact_speed = st.impact_speed.max((-vn) as f32);
-            if -vn > spec.hull_tolerance[k] {
-                st.status = STATUS_CRASHED;
-            }
-            let me = m_eff(p - x_com, n);
-            let kk = 0.1 * me / (dt * dt);
-            let cc = gain_cap(p - x_com, n);
-            let fnorm = (kk * pen - cc * vn).max(0.0);
-            let vt = vp - n * vn;
-            let vtn = vt.norm();
-            let ft = if vtn > 1e-9 {
-                vt * (-(prm.friction * fnorm / vtn).min(gain_cap(p - x_com, vt / vtn)))
-            } else {
-                V3::ZERO
-            };
-            let fc = n * fnorm + ft;
-            force += fc;
-            torque += (p - x_com).cross(fc);
         }
     }
     info.legs_in_contact = legs;
@@ -642,6 +698,68 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     let mut w = st.w + alpha * dt;
     let damp_w = to_world(&damp_l);
     w = w - mat_vec(&iw_inv, mat_vec(&damp_w, w)) * dt;
+    // PhysX contact solve (velocity level, sequential impulses). Measured in game (SimHarness
+    // collider dump): part colliders and KSC colliders carry no PhysicMaterial (Unity default:
+    // friction 0.6, bounciness 0, Average), PQS terrain "Ground" (0.9, combine Maximum);
+    // bounceThreshold 0.2, contactOffset 0.01, maxDepenetrationVelocity unlimited (part rbs).
+    // Contacts are speculative (v_n >= -gap/dt, gap < 0 = penetration); penetration recovery
+    // leaves DEPEN_VELOCITY_FRACTION * pen/dt in the body (maxDepenetrationVelocity is unlimited
+    // for part rigidbodies). A part breaks off (vessel lost) when the contact impulse per tick
+    // exceeds the breakForce of its joint (dumped: 4400 kN engine/tank, 4000 kN legs).
+    let (v_com_n, x_com_n) = if nc > 0 {
+        let mut v = v_com_n;
+        for c in &contacts[..nc] {
+            if c.gap <= 0.01 {
+                contact_any = true;
+                let vn = (v + w.cross(c.r)).dot(c.n);
+                st.impact_speed = st.impact_speed.max((-vn) as f32);
+            }
+        }
+        let mut lam_n = [0.0f64; MAX_CONTACTS];
+        let mut lam_t = [V3::ZERO; MAX_CONTACTS];
+        for _ in 0..8 {
+            for (ci, c) in contacts[..nc].iter().enumerate() {
+                let target = if c.gap >= 0.0 { -c.gap / dt } else { -c.gap / dt * DEPEN_VELOCITY_FRACTION };
+                let vp = v + w.cross(c.r);
+                let vn = vp.dot(c.n);
+                let rn = c.r.cross(c.n);
+                let k_n = 1.0 / m + rn.dot(mat_vec(&iw_inv, rn));
+                let dl = (target - vn) / k_n;
+                let new = (lam_n[ci] + dl).max(0.0);
+                let dj = new - lam_n[ci];
+                lam_n[ci] = new;
+                v += c.n * (dj / m);
+                w += mat_vec(&iw_inv, rn * dj);
+                let vp = v + w.cross(c.r);
+                let vt = vp - c.n * vp.dot(c.n);
+                let vtn = vt.norm();
+                if vtn > 1e-12 {
+                    let tdir = vt / vtn;
+                    let rt = c.r.cross(tdir);
+                    let k_t = 1.0 / m + rt.dot(mat_vec(&iw_inv, rt));
+                    let want = lam_t[ci] - tdir * (vtn / k_t);
+                    let cap = c.mu * lam_n[ci];
+                    let lt = if want.norm() > cap { want.normalized() * cap } else { want };
+                    let dj = lt - lam_t[ci];
+                    lam_t[ci] = lt;
+                    v += dj / m;
+                    w += mat_vec(&iw_inv, c.r.cross(dj));
+                }
+            }
+        }
+        for (ci, c) in contacts[..nc].iter().enumerate() {
+            if prm.crash {
+                let vn_after = (v + w.cross(c.r)).dot(c.n);
+                if lam_n[ci] / dt > c.break_force || -vn_after > c.crash_tol {
+                    st.status = STATUS_CRASHED;
+                }
+            }
+        }
+        let dv = v - v_com_n;
+        (v, x_com_n + dv * dt)
+    } else {
+        (v_com_n, x_com_n)
+    };
     let wn = w.norm();
     if wn > MAX_ANGULAR_VELOCITY {
         w = w * (MAX_ANGULAR_VELOCITY / wn);

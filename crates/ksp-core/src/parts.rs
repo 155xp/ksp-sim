@@ -76,6 +76,8 @@ pub struct PartDef {
     pub mass: f64,
     pub com_offset: V3,
     pub cop_offset: V3,
+    /// CoLOffset (body-lift application point), part frame
+    pub col_offset: V3,
     pub angular_drag: f64,
     pub crash_tolerance: f64,
     pub body_lift: bool,
@@ -87,6 +89,10 @@ pub struct PartDef {
     pub engine: Option<EngineDef>,
     pub reaction_wheel: Option<ReactionWheelDef>,
     pub leg: Option<LegDef>,
+    /// collision-rim radius at the bottom stack node (measured collider extents), if known
+    pub hull_radius: Option<f64>,
+    /// breakForce of the joint to the parent as the game sets it (SimHarness dump, kN)
+    pub joint_break_force: f64,
 }
 
 /// A PartDatabase cube line, converted to the sim's (x-mirrored) part frame.
@@ -101,6 +107,7 @@ pub fn mk1pod_v2() -> PartDef {
         mass: 0.8,
         com_offset: V3::ZERO,
         cop_offset: v3(0.0, 0.5, 0.0),
+        col_offset: v3(0.0, -0.35, 0.0),
         angular_drag: 2.0,
         crash_tolerance: 14.0,
         // ModuleLiftingSurface "CapsuleBottom" has disableBodyLift = False, so body lift stays on
@@ -112,6 +119,8 @@ pub fn mk1pod_v2() -> PartDef {
         engine: None,
         reaction_wheel: Some(ReactionWheelDef { pitch_torque: 5.0, yaw_torque: 5.0, roll_torque: 5.0, ec_rate: 0.24, torque_response_speed: 30.0 }),
         leg: None,
+        hull_radius: Some(0.625),
+        joint_break_force: 4400.0,
     }
 }
 
@@ -122,6 +131,7 @@ pub fn fuel_tank_t400() -> PartDef {
         mass: 0.25,
         com_offset: V3::ZERO,
         cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
         angular_drag: 2.0,
         crash_tolerance: 6.0,
         body_lift: true,
@@ -132,6 +142,8 @@ pub fn fuel_tank_t400() -> PartDef {
         engine: None,
         reaction_wheel: None,
         leg: None,
+        hull_radius: Some(0.604),
+        joint_break_force: 4400.0,
     }
 }
 
@@ -142,6 +154,7 @@ pub fn fuel_tank_t800() -> PartDef {
         mass: 0.5,
         com_offset: V3::ZERO,
         cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
         angular_drag: 2.0,
         crash_tolerance: 6.0,
         body_lift: true,
@@ -152,6 +165,8 @@ pub fn fuel_tank_t800() -> PartDef {
         engine: None,
         reaction_wheel: None,
         leg: None,
+        hull_radius: None,
+        joint_break_force: 4400.0,
     }
 }
 
@@ -163,6 +178,7 @@ pub fn swivel() -> PartDef {
         mass: 1.5,
         com_offset: V3::ZERO,
         cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
         angular_drag: 2.0,
         crash_tolerance: 7.0,
         body_lift: true,
@@ -185,6 +201,8 @@ pub fn swivel() -> PartDef {
         }),
         reaction_wheel: None,
         leg: None,
+        hull_radius: Some(0.316),
+        joint_break_force: 4400.0,
     }
 }
 
@@ -195,6 +213,7 @@ pub fn terrier() -> PartDef {
         mass: 0.5,
         com_offset: V3::ZERO,
         cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
         angular_drag: 2.0,
         crash_tolerance: 7.0,
         body_lift: true,
@@ -216,6 +235,8 @@ pub fn terrier() -> PartDef {
         }),
         reaction_wheel: None,
         leg: None,
+        hull_radius: None,
+        joint_break_force: 4400.0,
     }
 }
 
@@ -230,6 +251,7 @@ pub fn lt1_leg() -> PartDef {
         mass: 0.05,
         com_offset: V3::ZERO,
         cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
         angular_drag: 2.0,
         crash_tolerance: 12.0,
         body_lift: true,
@@ -241,6 +263,8 @@ pub fn lt1_leg() -> PartDef {
         reaction_wheel: None,
         // wheel pose not measured in game for the LT-1 (approximate)
         leg: Some(LegDef { anchor: v3(0.0, -0.6, 0.1), radius: 0.15, travel: 0.75 * 1.25, travel_cfg: 0.75, spring_ratio: 30.0, damper_ratio: 2.2, boost_ratio: 0.7, maximum_load: 40.0 }),
+        hull_radius: None,
+        joint_break_force: 4400.0,
     }
 }
 
@@ -255,6 +279,7 @@ pub fn lt2_leg() -> PartDef {
         mass: 0.1,
         com_offset: v3(0.0, 0.0, 0.1),
         cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
         angular_drag: 2.0,
         crash_tolerance: 12.0,
         body_lift: true,
@@ -267,6 +292,8 @@ pub fn lt2_leg() -> PartDef {
         // deployed WheelCollider measured in game (SimHarness geometry dump, ModuleWheelDeployment
         // deployTgt): part-local (0, -0.835, 0.104), radius 0.12*1.25, travel 0.95*1.25
         leg: Some(LegDef { anchor: v3(0.0, -0.835, 0.1039), radius: 0.15, travel: 1.1875, travel_cfg: 0.95, spring_ratio: 33.0, damper_ratio: 2.2, boost_ratio: 0.7, maximum_load: 40.0 }),
+        hull_radius: None,
+        joint_break_force: 4000.0,
     }
 }
 

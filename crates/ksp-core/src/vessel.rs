@@ -154,6 +154,8 @@ pub struct VesselSpec {
     /// root-frame positions: part CoM (origin + CoMOffset) and CoP (origin + CoPOffset)
     pub part_com: [V3; MAX_PARTS],
     pub part_cop: [V3; MAX_PARTS],
+    /// part CoL (origin + CoLOffset): body / surface lift application point
+    pub part_col: [V3; MAX_PARTS],
     pub part_rot: [Quat; MAX_PARTS],
     /// box inertia per tonne (part-local diagonal), from cube size
     pub part_inertia_per_t: [V3; MAX_PARTS],
@@ -173,6 +175,8 @@ pub struct VesselSpec {
     pub n_hull: u32,
     pub hull: [V3; MAX_HULL],
     pub hull_tolerance: [f64; MAX_HULL],
+    /// breakForce (kN) of the joint between the hull point's part and its parent (INF for the root)
+    pub hull_break_force: [f64; MAX_HULL],
     pub rw_torque: V3,
     pub rw_ec_rate: f64,
     pub rw_response: f64,
@@ -189,6 +193,7 @@ impl VesselSpec {
             part_res_cap: [[0.0; N_RES]; MAX_PARTS],
             part_com: [V3::ZERO; MAX_PARTS],
             part_cop: [V3::ZERO; MAX_PARTS],
+            part_col: [V3::ZERO; MAX_PARTS],
             part_rot: [Quat::IDENTITY; MAX_PARTS],
             part_inertia_per_t: [V3::ZERO; MAX_PARTS],
             part_faces: [AeroFaces::default(); MAX_PARTS],
@@ -204,6 +209,7 @@ impl VesselSpec {
             n_hull: 0,
             hull: [V3::ZERO; MAX_HULL],
             hull_tolerance: [0.0; MAX_HULL],
+            hull_break_force: [f64::INFINITY; MAX_HULL],
             rw_torque: V3::ZERO,
             rw_ec_rate: 0.0,
             rw_response: 30.0,
@@ -218,6 +224,7 @@ impl VesselSpec {
             }
             s.part_com[i] = p.pos + p.rot.rotate(d.com_offset);
             s.part_cop[i] = p.pos + p.rot.rotate(d.cop_offset);
+            s.part_col[i] = p.pos + p.rot.rotate(d.col_offset);
             s.part_rot[i] = p.rot;
             let z = d.cube.size;
             s.part_inertia_per_t[i] = v3(z.y * z.y + z.z * z.z, z.x * z.x + z.z * z.z, z.x * z.x + z.y * z.y) / 12.0;
@@ -307,14 +314,17 @@ impl VesselSpec {
             } else {
                 // hull points: a ring at each stack node (bottom ring sized like the part, smaller
                 // for an engine bell) and the top centre
-                let r = if d.engine.is_some() { 0.35 } else { 0.5 * d.cube.size.x.min(d.cube.size.z) };
+                // collider rim radius at the bottom node, measured in game (SimHarness collider
+                // extents): Swivel bell Col3 0.316, FL-T400 COL3 0.604, Mk1 pod COL 0.625
+                let r = d.hull_radius.unwrap_or(if d.engine.is_some() { 0.316 } else { 0.5 * d.cube.size.x.min(d.cube.size.z) });
+                let bf = if i == 0 { f64::INFINITY } else { d.joint_break_force };
                 if let Some((nb, _)) = d.node_bottom {
                     for (dx, dz) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-                        s.add_hull(p.pos + p.rot.rotate(nb + v3(dx * r, 0.0, dz * r)), d.crash_tolerance);
+                        s.add_hull(p.pos + p.rot.rotate(nb + v3(dx * r, 0.0, dz * r)), d.crash_tolerance, bf);
                     }
                 }
                 if let Some((nt, _)) = d.node_top {
-                    s.add_hull(p.pos + p.rot.rotate(nt), d.crash_tolerance);
+                    s.add_hull(p.pos + p.rot.rotate(nt), d.crash_tolerance, bf);
                 }
             }
         }
@@ -325,10 +335,11 @@ impl VesselSpec {
         s
     }
 
-    fn add_hull(&mut self, p: V3, tol: f64) {
+    fn add_hull(&mut self, p: V3, tol: f64, break_force: f64) {
         if (self.n_hull as usize) < MAX_HULL {
             self.hull[self.n_hull as usize] = p;
             self.hull_tolerance[self.n_hull as usize] = tol;
+            self.hull_break_force[self.n_hull as usize] = break_force;
             self.n_hull += 1;
         }
     }

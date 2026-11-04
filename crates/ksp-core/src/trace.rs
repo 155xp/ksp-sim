@@ -187,6 +187,22 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
     }
     let mut s = VesselSpec::compile(&craft);
     let mut e_idx = 0;
+    // joint breakForce per part from the dump
+    let mut hk = 0usize;
+    for g in geom.iter() {
+        let bf = g.get("joint").and_then(|j| fields(j).get("breakForce").map(|b| nums(b)[0])).unwrap_or(f64::INFINITY);
+        let is_leg = g.name.starts_with("landingLeg");
+        if !is_leg {
+            let def = parts::by_name(&g.name.replace('.', "_")).unwrap();
+            let nh = 4 * def.node_bottom.is_some() as usize + def.node_top.is_some() as usize;
+            for _ in 0..nh {
+                if hk < s.n_hull as usize {
+                    s.hull_break_force[hk] = bf;
+                    hk += 1;
+                }
+            }
+        }
+    }
     for (i, g) in geom.iter().enumerate() {
         // rigidbody CoM, inertia (Unity: diag inertiaTensor in the frame inertiaTensorRotation
         // relative to the part transform), all per tonne of the dump-time rb.mass
@@ -242,7 +258,13 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
                 }
             }
         }
-        for tt in g.all("thrustTransform") {
+        // thrust transforms: the settled (end-of-test) pose when available -- after spawn the engine
+        // joint sags by 1e-6..2e-4 rad in a random direction (7 flights), constant thereafter
+        let tsrc: Vec<&str> = match wheels.and_then(|w| w.get(i)) {
+            Some(we) if we.get("thrustTransform").is_some() => we.all("thrustTransform").collect(),
+            _ => g.all("thrustTransform").collect(),
+        };
+        for tt in tsrc {
             let f = fields(tt);
             let p = mpos(&nums(&f["pos"]));
             let fw = mpos(&nums(&f["fwd"]));

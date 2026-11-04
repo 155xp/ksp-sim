@@ -147,6 +147,7 @@ namespace SimHarness
             test = f[1];
             maxSec = f.Length > 2 ? double.Parse(f[2], H.C) : 300;
             t0 = Time.realtimeSinceStartup;
+            if (test.StartsWith("Survey")) { StartCoroutine(Survey()); return; }
             act = OnTick;
             TimingManager.FixedUpdateAdd(TimingManager.TimingStage.BetterLateThanNever, act);
         }
@@ -164,6 +165,81 @@ namespace SimHarness
             if (finishing || string.IsNullOrEmpty(test)) return;
             if (Time.realtimeSinceStartup - t0 > maxSec) StartCoroutine(Finish(false));
             else if (partDied && Time.realtimeSinceStartup - diedAt > 3f) StartCoroutine(Finish(false, "crashed"));
+        }
+
+        // Ground survey: downward Physics.Raycasts on a local East/North grid around the launch pad
+        // spawn point against the scenery layer (15: PQS terrain + KSC colliders), recording the hit
+        // height above the body radius and the surface normal in the body frame.
+        IEnumerator Survey()
+        {
+            while (FlightGlobals.ActiveVessel == null || FlightGlobals.ActiveVessel.packed || !FlightGlobals.ready) yield return null;
+            yield return new WaitForSecondsRealtime(8f);
+            var vsl = FlightGlobals.ActiveVessel;
+            var b = vsl.mainBody;
+            var site = PSystemSetup.Instance.GetSpaceCenterFacility("LaunchPad").GetSpawnPoint("LaunchPad");
+            Vector3d padW = site.GetSpawnPointTransform().position;
+            Vector3d upW = (padW - b.position).normalized;
+            Vector3d eastW = Vector3d.Cross(b.angularVelocity.normalized, upW).normalized;
+            if (eastW.magnitude < 0.5) eastW = Vector3d.Cross(Vector3d.up, upW).normalized;
+            Vector3d northW = Vector3d.Cross(upW, eastW).normalized;
+            int mask = 1 << 15;
+            var colInfo = new Dictionary<string, string>();
+            foreach (var grid in new[] { new[] { 0.2, 40.0 }, new[] { 4.0, 1500.0 } })
+            {
+                double stp = grid[0], half = grid[1];
+                int n = (int)Math.Round(2 * half / stp) + 1;
+                var sb = new StringBuilder();
+                sb.AppendLine("# step=" + H.R(stp) + " half=" + H.R(half) + " n=" + n + " pad_bf=" + H.V(BF(b, padW - b.position)) + " east_bf=" + H.V(BF(b, eastW)) + " north_bf=" + H.V(BF(b, northW)) + " up_bf=" + H.V(BF(b, upW)));
+                sb.AppendLine("ie,in,e,n,hit,alt,nx,ny,nz,layer,collider");
+                for (int ie = 0; ie < n; ie++)
+                {
+                    for (int jn = 0; jn < n; jn++)
+                    {
+                        double e = -half + ie * stp, nn = -half + jn * stp;
+                        Vector3d top = padW + eastW * e + northW * nn + upW * 300.0;
+                        Vector3d dirW = -(top - b.position).normalized;
+                        RaycastHit hit;
+                        if (Physics.Raycast((Vector3)top, (Vector3)dirW, out hit, 700f, mask))
+                        {
+                            if (!colInfo.ContainsKey(hit.collider.name))
+                            {
+                                var arb = hit.collider.attachedRigidbody;
+                                var pm = hit.collider.sharedMaterial;
+                                colInfo[hit.collider.name] = "layer=" + hit.collider.gameObject.layer + " rb=" + (arb != null) + (arb != null ? " rb.mass=" + H.R(arb.mass) + " kinematic=" + arb.isKinematic : "") +
+                                    " material=" + (pm != null ? pm.name + " dyn=" + H.R(pm.dynamicFriction) + " stat=" + H.R(pm.staticFriction) + " bounce=" + H.R(pm.bounciness) + " fc=" + pm.frictionCombine + " bc=" + pm.bounceCombine : "none") +
+                                    " PQ=" + (hit.collider.GetComponent<PQ>() != null) + " type=" + hit.collider.GetType().Name;
+                            }
+                            Vector3d hp = (Vector3d)hit.point - b.position;
+                            sb.Append(ie).Append(',').Append(jn).Append(',').Append(H.R(e)).Append(',').Append(H.R(nn)).Append(",1,")
+                              .Append(H.R(hp.magnitude - b.Radius)).Append(',').Append(H.V(BF(b, (Vector3d)hit.normal))).Append(',')
+                              .Append(hit.collider.gameObject.layer).Append(',').Append(hit.collider.name.Replace(',', ' ')).Append('\n');
+                        }
+                        else
+                            sb.Append(ie).Append(',').Append(jn).Append(',').Append(H.R(e)).Append(',').Append(H.R(nn)).Append(",0,nan,nan,nan,nan,-1,none\n");
+                    }
+                    if (ie % 50 == 0) yield return null;
+                }
+                File.WriteAllText(Path.Combine(H.LogDir, test + "_" + H.R(stp) + ".csv"), sb.ToString());
+                H.Log("survey grid " + stp + " done");
+            }
+            var ci = new StringBuilder();
+            foreach (var kv in colInfo) ci.AppendLine(kv.Key + " : " + kv.Value);
+            // the vessel's own part colliders: physic materials
+            foreach (var p in vsl.parts)
+                foreach (var col in p.GetComponentsInChildren<Collider>(true))
+                {
+                    var pm = col.sharedMaterial;
+                    ci.AppendLine("PART " + p.partInfo.name + " / " + col.name + " : layer=" + col.gameObject.layer + " material=" + (pm != null ? pm.name + " dyn=" + H.R(pm.dynamicFriction) + " stat=" + H.R(pm.staticFriction) + " bounce=" + H.R(pm.bounciness) + " fc=" + pm.frictionCombine + " bc=" + pm.bounceCombine : "none"));
+                }
+            ci.AppendLine("Physics: bounceThreshold=" + H.R(Physics.bounceThreshold) + " defaultContactOffset=" + H.R(Physics.defaultContactOffset) + " sleepThreshold=" + H.R(Physics.sleepThreshold) + " maxDepen(root)=" + H.R(vsl.rootPart.rb.maxDepenetrationVelocity) + " solverIter=" + Physics.defaultSolverIterations + "/" + Physics.defaultSolverVelocityIterations);
+            for (int a = 0; a < 32; a++)
+            {
+                var row = new StringBuilder();
+                for (int bb = 0; bb < 32; bb++) row.Append(Physics.GetIgnoreLayerCollision(a, bb) ? '.' : 'X');
+                ci.AppendLine("layer " + a.ToString("00") + " " + LayerMask.LayerToName(a).PadRight(22) + " " + row);
+            }
+            File.WriteAllText(Path.Combine(H.LogDir, test + "_colliders.txt"), ci.ToString());
+            StartCoroutine(Finish(true));
         }
 
         void OnDestroy()
@@ -234,6 +310,21 @@ namespace SimHarness
                     if (sc != null) s += " center=" + H.V(sc.center) + " r=" + H.R(sc.radius);
                     if (cc != null) s += " center=" + H.V(cc.center) + " r=" + H.R(cc.radius) + " h=" + H.R(cc.height) + " dir=" + cc.direction;
                     s += " pos=" + H.V(root.transform.InverseTransformPoint(col.transform.position)) + " rot=" + H.Q(Quaternion.Inverse(root.transform.rotation) * col.transform.rotation) + " lossyScale=" + H.V(col.transform.lossyScale);
+                    // extreme points of the collider along the six root axes (ClosestPoint to a far
+                    // point; exact for convex colliders), in root-local coordinates
+                    try
+                    {
+                        if (!(col is WheelCollider) && (!(col is MeshCollider) || ((MeshCollider)col).convex))
+                        {
+                            var c0 = col.bounds.center;
+                            foreach (var ax in new[] { -root.transform.up, root.transform.up, root.transform.right, -root.transform.right, root.transform.forward, -root.transform.forward })
+                            {
+                                var cp = col.ClosestPoint(c0 + ax * 1000f);
+                                s += " ext=" + H.V(root.transform.InverseTransformPoint(cp));
+                            }
+                        }
+                    }
+                    catch (Exception) { }
                     sb.AppendLine(s);
                 }
                 foreach (var e in p.FindModulesImplementing<ModuleEngines>())
@@ -270,7 +361,7 @@ namespace SimHarness
             for (int k = 0; k < wheels.Count; k++)
                 cols.AddRange(new[] { "rw" + k + "_x", "rw" + k + "_y", "rw" + k + "_z", "rw" + k + "_op" });
             for (int k = 0; k < parts.Count; k++)
-                cols.AddRange(new[] { "p" + k + "_drag", "p" + k + "_lift", "p" + k + "_dvx", "p" + k + "_dvy", "p" + k + "_dvz", "p" + k + "_spa", "p" + k + "_rx", "p" + k + "_ry", "p" + k + "_rz" });
+                cols.AddRange(new[] { "p" + k + "_drag", "p" + k + "_lift", "p" + k + "_dvx", "p" + k + "_dvy", "p" + k + "_dvz", "p" + k + "_spa", "p" + k + "_rx", "p" + k + "_ry", "p" + k + "_rz", "p" + k + "_blx", "p" + k + "_bly", "p" + k + "_blz" });
             for (int k = 0; k < wcs.Count; k++)
                 cols.AddRange(new[] { "wc" + k + "_grounded", "wc" + k + "_force", "wc" + k + "_compr", "wc" + k + "_spring", "wc" + k + "_damper", "wc" + k + "_target", "wc" + k + "_sprung",
                     "wc" + k + "_hx", "wc" + k + "_hy", "wc" + k + "_hz", "wc" + k + "_fwdslip", "wc" + k + "_sideslip" });
@@ -339,6 +430,8 @@ namespace SimHarness
                 a(ok ? H.R(p.dragScalar) : "nan"); a(ok ? H.R(p.bodyLiftScalar) : "nan");
                 a(ok ? H.V(BF(b, (Vector3d)p.dragVectorDir)) : "nan,nan,nan"); a(ok ? H.R(p.staticPressureAtm) : "nan");
                 a(ok ? H.V(root.transform.InverseTransformPoint(p.transform.position)) : "nan,nan,nan");
+                // body lift as applied: ProjectOnPlane(rotation * (bodyLiftScalar * bodyLiftLocalVector), -v)
+                a(ok ? H.V(BF(b, (Vector3d)Vector3.ProjectOnPlane(p.transform.rotation * (p.bodyLiftScalar * p.bodyLiftLocalVector), -p.dragVectorDir))) : "nan,nan,nan");
             }
             for (int k = 0; k < wcs.Count; k++)
             {

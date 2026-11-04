@@ -27,9 +27,9 @@ function land_from_fall {
   // track a sqrt-profile descent rate down to ~1 m/s at touchdown, engine off on contact
   lock h to alt:radar - base_ralt.
   lock amax to ship:availablethrust / ship:mass - g0.
-  wait until ship:verticalspeed < -1 and h < ship:verticalspeed ^ 2 / (2 * amax * 0.8) + 8.
-  lock vs_tgt to -min(80, sqrt(max(0, 2 * amax * 0.55 * max(0, h - 0.3)))) - 1.
-  lock throttle to thr_for_vs(vs_tgt, 2.0).
+  wait until ship:verticalspeed < -1 and h < ship:verticalspeed ^ 2 / (2 * amax * 0.6) + 15.
+  lock vs_tgt to -min(80, sqrt(max(0, 2 * amax * 0.4 * max(0, h - 0.5)))) - 1.5.
+  lock throttle to thr_for_vs(vs_tgt, 2.5).
   wait until ship:status = "LANDED".
   lock throttle to 0.
 }

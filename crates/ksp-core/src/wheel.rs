@@ -27,6 +27,9 @@
 
 use crate::math::V3;
 
+/// LT-2 jounce at which the piston collider reaches flat ground (measured, see `piston_stop`).
+pub const PISTON_STOP_JOUNCE: f64 = 0.84;
+
 /// Per-leg, per-env dynamic state.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[repr(C)]
@@ -86,6 +89,14 @@ pub struct LegSpec {
 }
 
 impl LegSpec {
+    /// The leg structure point that strikes the ground when the suspension bottoms out (the piston
+    /// collider): measured in game (traces HopperSuicide / HopperHop v2) as a hard stop at jounce
+    /// 0.84 m on the flat pad deck, i.e. a point 0.84 m above the full-extension contact point
+    /// along the suspension axis.
+    pub fn piston_stop(&self) -> V3 {
+        self.anchor - self.up * (self.travel + self.radius - PISTON_STOP_JOUNCE)
+    }
+
     /// Contact point at full extension (anchor - up * (travel + radius)), root frame.
     pub fn foot(&self) -> V3 {
         self.anchor - self.up * (self.travel + self.radius)
