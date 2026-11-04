@@ -4,3 +4,4 @@ pub mod bodies_data;
 pub mod curve;
 pub mod ksc;
 pub mod math;
+pub mod orbit;
