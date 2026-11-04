@@ -208,6 +208,11 @@ pub const DIVERT: bool = true;
 /// Fraction of the nominal divert reach the landing burn reliably achieves (lift reversal and
 /// attitude lag eat the rest; calibrated on Monte Carlo replays).
 pub const REACH_FRACTION: f64 = 0.2;
+/// Cancel the gimbal deflection's own side force in the landing law (tried: destabilises; off).
+pub const CANCEL_GIMBAL_SIDE_FORCE: bool = false;
+/// Attitude rate cap in the final constant-rate segment (rad/s): slow, small-gimbal rotations
+/// there so the nozzle deflection doesn't push the booster sideways near contact.
+pub const FINAL_RATE: f64 = 0.15;
 /// Drive the in-air swing to engine-first with the gimbal (tried; costs more than it saves: off).
 pub const GIMBAL_SWING: bool = false;
 /// Coast instead of full-throttle flip assist when even full throttle cannot beat the aero moment.
@@ -825,6 +830,26 @@ impl Flight {
     }
 
 
+    /// Acceleration (pad ENU) from the engines' current gimbal deflection: thrust along the
+    /// deflected nozzles minus thrust along the undeflected ones.
+    fn gimbal_side_accel(&self, n: &Nav) -> V3 {
+        let spec = self.spec();
+        let mut f = V3::ZERO;
+        for k in 0..spec.n_engines as usize {
+            let e = &spec.engines[k];
+            let thr = self.st.thr[k];
+            if thr <= 0.0 || e.gimbal_range_deg <= 0.0 {
+                continue;
+            }
+            let p = p_atm(n.alt);
+            let t = e.max_fuel_flow * thr * ksp_core::engine::isp(e, p) * ENGINE_G0;
+            let g = self.st.gimbal[k];
+            let gq = ksp_core::math::Quat::angle_axis(g[0], v3(1.0, 0.0, 0.0)) * ksp_core::math::Quat::angle_axis(g[1], v3(0.0, 0.0, 1.0));
+            f += n.q.rotate(gq.rotate(e.dir) - e.dir) * t;
+        }
+        Pad::ksc().vec_to_enu(f / n.m)
+    }
+
     /// Lateral reach of the landing burn from here (m).
     fn divert_reach(&mut self, n: &Nav) -> f64 {
         self.update_hold_height(n);
@@ -938,6 +963,13 @@ impl Flight {
         let mut ah = if r.z > hh || (zem.x * zem.x + zem.y * zem.y).sqrt() <= lim { zem } else { v3(-v.x, -v.y, 0.0) * (1.0 / (2.0 * self.t_settle).max(0.8)) };
         ah.x -= grav.x;
         ah.y -= grav.y;
+        // cancel the side force the gimbal deflection itself is producing (large-gimbal craft
+        // otherwise push themselves sideways every time they rotate)
+        if CANCEL_GIMBAL_SIDE_FORCE {
+            let gs = self.gimbal_side_accel(n);
+            ah.x -= gs.x;
+            ah.y -= gs.y;
+        }
         v3(ah.x, ah.y, az)
     }
 
@@ -1321,7 +1353,8 @@ impl Flight {
             }
             Phase::Done => {}
         }
-        let o = attitude::point(self.spec(), &self.st, &n, self.cmd_dir, self.cmd_thr, aero_ff);
+        let final_seg = self.phase == Phase::LandingBurn && self.landing_state(&n).0.z < self.hold_height();
+        let o = attitude::point_rate(self.spec(), &self.st, &n, self.cmd_dir, self.cmd_thr, aero_ff, if final_seg { FINAL_RATE } else { attitude::MAX_RATE });
         if debug() && self.phase == Phase::LandingBurn && self.st.ticks % 10 == 0 {
             eprintln!("     att err {:.1} deg alpha_avail {:.3} ctl p {:.2} y {:.2} r {:.2}", o.err.to_degrees(), o.alpha_avail, o.ctl.pitch, o.ctl.yaw, o.ctl.roll);
         }

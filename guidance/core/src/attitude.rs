@@ -110,6 +110,12 @@ pub struct AttitudeOut {
 /// Torque-allocating pointing controller. `dir` is the desired thrust-axis direction
 /// (body-fixed); `throttle` is passed through (and used for the gimbal authority).
 pub fn point(spec: &VesselSpec, st: &EnvState, nav: &Nav, dir: V3, throttle: f64, aero_ff: bool) -> AttitudeOut {
+    point_rate(spec, st, nav, dir, throttle, aero_ff, MAX_RATE)
+}
+
+/// `point` with an explicit rate limit (rad/s).
+#[allow(clippy::too_many_arguments)]
+pub fn point_rate(spec: &VesselSpec, st: &EnvState, nav: &Nav, dir: V3, throttle: f64, aero_ff: bool, max_rate: f64) -> AttitudeOut {
     let eff = effectiveness(spec, st, nav, throttle);
     let i_l = &nav.inertia_l;
     let w = nav.w_l;
@@ -144,7 +150,7 @@ pub fn point(spec: &VesselSpec, st: &EnvState, nav: &Nav, dir: V3, throttle: f64
         let a = (BRAKE_FRACTION * (alpha_avail - tau_aero.dot(n).abs() / i_n)).max(0.05 * alpha_avail).max(1e-6);
         let tb = POINT_TAU;
         let mag = a * tb * ((1.0 + 2.0 * theta / (a * tb * tb)).sqrt() - 1.0);
-        omega_des = n * mag.min(MAX_RATE);
+        omega_des = n * mag.min(max_rate);
     }
     // inner rate loop (roll is just damped)
     let alpha_cmd = (omega_des - w) / RATE_TAU;
