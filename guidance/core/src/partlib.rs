@@ -107,11 +107,9 @@ fn truthy(n: &Node, k: &str) -> bool {
 /// Cube choice: "Clean" (engines: nothing on the bottom node, as ksp-core's Swivel), else
 /// "Default", else the first listed cube (variant 0).
 pub fn load(name: &str) -> Result<PartDef, String> {
-    match name {
-        // ksp-core's transcriptions (incl. its leg foot approximations)
-        "landingLeg1" => return Ok(parts::lt1_leg()),
-        "landingLeg1-2" => return Ok(parts::lt2_leg()),
-        _ => {}
+    // ksp-core's validated transcriptions (in-game measured hull / crash / leg data) first
+    if let Some(d) = parts::by_name(name) {
+        return Ok(d);
     }
     let lib = library()?;
     let p = lib.parts.get(name).ok_or_else(|| format!("part {name} not in install"))?;
@@ -160,6 +158,7 @@ pub fn load(name: &str) -> Result<PartDef, String> {
                 gimbal_response_speed: gimbal_speed,
                 thrust_pos: node_bottom.map_or(V3::ZERO, |n| n.0),
                 thrust_dir: v3(0.0, 1.0, 0.0),
+                gimbal_pivot: V3::ZERO,
             }
         });
     let reaction_wheel = module("ModuleReactionWheel").map(|m| ReactionWheelDef {
@@ -176,6 +175,7 @@ pub fn load(name: &str) -> Result<PartDef, String> {
         mass: p.get_f64("mass").unwrap_or(0.0),
         com_offset: get_v3(p, "CoMOffset").unwrap_or(V3::ZERO),
         cop_offset: get_v3(p, "CoPOffset").unwrap_or(V3::ZERO),
+        col_offset: get_v3(p, "CoLOffset").unwrap_or(V3::ZERO),
         angular_drag: p.get_f64("angularDrag").unwrap_or(2.0),
         crash_tolerance: p.get_f64("crashTolerance").unwrap_or(9.0),
         body_lift,
@@ -186,6 +186,11 @@ pub fn load(name: &str) -> Result<PartDef, String> {
         engine,
         reaction_wheel,
         leg: None,
+        hull_radius: None,
+        // the game sets 4400 kN on every stock stack joint measured so far (SimHarness dumps)
+        joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
     })
 }
 

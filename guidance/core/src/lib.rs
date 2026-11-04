@@ -4,6 +4,7 @@
 //! CoM, inertia, thrust and Isp at the current pressure, throttle limits, gimbal geometry, reaction
 //! wheel torque, drag cubes), so the same code flies any booster `craft` can build.
 pub mod craft;
+pub mod ingame;
 pub mod partlib;
 pub mod nav;
 pub mod predict;

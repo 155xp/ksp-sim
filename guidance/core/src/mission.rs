@@ -706,12 +706,12 @@ impl Flight {
     /// Max tilt at touchdown from the leg footprint: 30 % of the tip-over angle.
     fn touchdown_tilt(&self, n: &Nav) -> f64 {
         let spec = self.spec();
-        let r_feet = (0..spec.n_legs as usize).map(|k| (spec.legs[k].foot.x.powi(2) + spec.legs[k].foot.z.powi(2)).sqrt()).fold(f64::INFINITY, f64::min);
+        let r_feet = (0..spec.n_legs as usize).map(|k| (spec.legs[k].foot().x.powi(2) + spec.legs[k].foot().z.powi(2)).sqrt()).fold(f64::INFINITY, f64::min);
         let h = touchdown_height(spec, n.com_l).max(0.1);
         if !r_feet.is_finite() {
             return 2f64.to_radians();
         }
-        (0.3 * (r_feet / h).atan()).clamp(2f64.to_radians(), 8f64.to_radians())
+        (0.3f64 * (r_feet / h).atan()).clamp(2f64.to_radians(), 8f64.to_radians())
     }
 
     fn stop(&self, n: &Nav) -> landing::Stop {

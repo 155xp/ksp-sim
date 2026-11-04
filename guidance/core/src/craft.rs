@@ -83,7 +83,7 @@ fn place_below(c: &mut Craft, parent: usize, def: PartDef, offset: V3) -> usize 
     let i = c.parts.len();
     let rot = p.rot;
     c.parts[parent].stack.push((i, pbd));
-    c.parts.push(Placed { def, pos, rot, stack: vec![(parent, ctd)] });
+    c.parts.push(Placed { def, pos, rot, stack: vec![(parent, ctd)], parent: Some(parent) });
     i
 }
 
@@ -95,7 +95,7 @@ fn place_above(c: &mut Craft, child: usize, def: PartDef) -> usize {
     let i = c.parts.len();
     let rot = p.rot;
     c.parts[child].stack.push((i, ptd));
-    c.parts.push(Placed { def, pos, rot, stack: vec![(child, cbd)] });
+    c.parts.push(Placed { def, pos, rot, stack: vec![(child, cbd)], parent: Some(child) });
     i
 }
 
@@ -121,7 +121,7 @@ pub fn build(d: &BoosterDesign) -> Result<Built, String> {
         return Err("design outside ksp-core limits".into());
     }
     let bottom = partlib::load(d.tanks.last().unwrap())?;
-    let mut c = Craft { parts: vec![Placed { def: bottom, pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![] }] };
+    let mut c = Craft { parts: vec![Placed { def: bottom, pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![], parent: None }] };
     // engines under the bottom tank
     let eng = partlib::load(&d.engine)?;
     let ew = eng.cube.size.x.max(eng.cube.size.z);
@@ -135,7 +135,8 @@ pub fn build(d: &BoosterDesign) -> Result<Built, String> {
     // legs on the bottom tank, feet LEG_CLEARANCE below the lowest nozzle
     let leg = partlib::load("landingLeg1-2")?;
     let r_tank = 0.5 * c.parts[0].def.cube.size.x;
-    let foot_y = leg.leg.unwrap().foot.y;
+    let ld = leg.leg.clone().unwrap();
+    let foot_y = ld.anchor.y - ld.travel - ld.radius;
     let attach_y = eng_bottom - LEG_CLEARANCE - foot_y;
     for k in 0..d.n_legs {
         let az = 90.0 + 360.0 / d.n_legs as f64 * k as f64;

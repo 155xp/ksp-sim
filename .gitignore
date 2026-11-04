@@ -11,3 +11,6 @@ __pycache__/
 /data/
 harness/plugin/bin/
 harness/plugin/obj/
+ingame/plugin/bin/
+ingame/plugin/obj/
+.venv/

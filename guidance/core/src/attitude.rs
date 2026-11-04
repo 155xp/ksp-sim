@@ -45,8 +45,9 @@ pub fn effectiveness(spec: &VesselSpec, st: &EnvState, nav: &Nav, throttle: f64)
     let mut out = Effectiveness::default();
     let ec = st.res[Res::ElectricCharge as usize];
     if ec > 1e-6 {
+        // ksp-core sim.rs 3b (game-measured): root torque = (-pitch*Tx, +roll*Ty, +yaw*Tz)
         let t = spec.rw_torque;
-        out.b_rw = [v3(-t.x, 0.0, 0.0), v3(0.0, 0.0, -t.z), v3(0.0, -t.y, 0.0)];
+        out.b_rw = [v3(-t.x, 0.0, 0.0), v3(0.0, 0.0, t.z), v3(0.0, t.y, 0.0)];
     }
     out.b = out.b_rw;
     if throttle > 0.0 {
@@ -57,13 +58,13 @@ pub fn effectiveness(spec: &VesselSpec, st: &EnvState, nav: &Nav, throttle: f64)
             if thrust <= 0.0 || e.gimbal_range_deg <= 0.0 {
                 continue;
             }
+            // ksp-core sim.rs 3a (game-measured): pitch about root +X by s*range, yaw about root
+            // +Z by -s*range, thrust transform swinging about the gimbal pivot
             let sgn = if nav.com_l.y > e.pos.y { 1.0 } else { -1.0 };
-            let arm = e.pos - nav.com_l;
-            let f0 = e.dir * thrust;
-            let fp = Quat::angle_axis(sgn * e.gimbal_range_deg, v3(1.0, 0.0, 0.0)).rotate(e.dir) * thrust;
-            let fy = Quat::angle_axis(sgn * e.gimbal_range_deg, v3(0.0, 0.0, 1.0)).rotate(e.dir) * thrust;
-            out.b[0] += arm.cross(fp - f0);
-            out.b[1] += arm.cross(fy - f0);
+            let tq = |gq: Quat| -> V3 { (e.pivot + gq.rotate(e.pos - e.pivot) - nav.com_l).cross(gq.rotate(e.dir) * thrust) };
+            let t0 = tq(Quat::IDENTITY);
+            out.b[0] += tq(Quat::angle_axis(sgn * e.gimbal_range_deg, v3(1.0, 0.0, 0.0))) - t0;
+            out.b[1] += tq(Quat::angle_axis(-sgn * e.gimbal_range_deg, v3(0.0, 0.0, 1.0))) - t0;
         }
     }
     out
