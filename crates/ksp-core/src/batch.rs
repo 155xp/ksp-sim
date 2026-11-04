@@ -369,7 +369,8 @@ impl Batch {
             if st.status == sim::STATUS_LANDED {
                 outc = OUT_LANDED;
                 r += 10.0 + 10.0 * (1.0 - dh / 10.0).max(0.0);
-            } else if st.status == sim::STATUS_CRASHED {
+            } else if st.status == sim::STATUS_CRASHED || (st.status == sim::STATUS_CONTACT && o[8] < 0.5) {
+                // destroyed, or tipped over (> 60 deg) while touching the ground
                 outc = OUT_CRASHED;
                 r -= 10.0;
             } else if dh > cfg.oob_radius as f32 || o[2] > cfg.oob_alt as f32 {

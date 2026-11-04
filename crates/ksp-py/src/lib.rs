@@ -210,10 +210,10 @@ fn hopper_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 /// Run the full sim for a single hopper with a fixed control for `ticks` 0.02 s ticks from a
 /// given pad-ENU position / velocity (vertical attitude). Returns arrays (t, alt, v_up, mach, q).
 #[pyfunction]
-#[pyo3(signature = (alt, v_up, throttle, ticks, aero = true))]
-fn hopper_drop<'py>(py: Python<'py>, alt: f64, v_up: f64, throttle: f64, ticks: usize, aero: bool) -> PyResult<PyObject> {
+#[pyo3(signature = (alt, v_up, throttle, ticks, aero = true, sun_temperature = true))]
+fn hopper_drop<'py>(py: Python<'py>, alt: f64, v_up: f64, throttle: f64, ticks: usize, aero: bool, sun_temperature: bool) -> PyResult<PyObject> {
     let spec = VesselSpec::compile(&Craft::hopper());
-    let prm = Params { aero, ground: false, ..Params::default() };
+    let prm = Params { aero, ground: false, sun_temperature, ..Params::default() };
     let (e, _n, u) = sim::pad_enu();
     let q = sim::attitude(u, e);
     let mut st = sim::state_at_pad(&spec, ksp_core::math::v3(0.0, 0.0, alt), ksp_core::math::v3(0.0, 0.0, v_up), q, ksp_core::math::V3::ZERO, 0.0);
@@ -223,11 +223,76 @@ fn hopper_drop<'py>(py: Python<'py>, alt: f64, v_up: f64, throttle: f64, ticks: 
         let info = sim::tick(&spec, &prm, &mut st, &ctl);
         ts.push(st.ut);
         hs.push(info.alt);
-        vs.push(info.v_srf.dot(u));
+        // velocity after the tick (CoM, surface-relative)
+        let (_, com_l, _) = spec.mass_props(&st.res);
+        vs.push((st.v + st.w.cross(st.q.rotate(com_l))).dot(u));
         ms.push(info.atm.mach);
         qs.push(info.atm.q_kpa);
     }
     Ok((PyArray1::from_vec(py, ts), PyArray1::from_vec(py, hs), PyArray1::from_vec(py, vs), PyArray1::from_vec(py, ms), PyArray1::from_vec(py, qs)).into_pyobject(py)?.into_any().unbind())
+}
+
+
+fn keys_array<'py>(py: Python<'py>, keys: &[ksp_core::curve::Key]) -> Bound<'py, PyArray2<f64>> {
+    let rows: Vec<Vec<f64>> = keys.iter().map(|k| vec![k.t, k.v, k.tin, k.tout]).collect();
+    PyArray2::from_vec2(py, &rows).unwrap()
+}
+
+/// Everything the reduced point-mass model (CUDA path) needs: curve keys, body/pad constants,
+/// hopper engine and mass data, and the hopper's axial CdA(mach) measured from the full sim.
+#[pyfunction]
+fn point_mass_tables<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+    let b = body::KERBIN;
+    let spec = VesselSpec::compile(&Craft::hopper());
+    let d = PyDict::new(py);
+    d.set_item("pressure_keys", keys_array(py, b.pressure_curve))?;
+    d.set_item("temperature_keys", keys_array(py, b.temperature_curve))?;
+    d.set_item("temp_sun_mult_keys", keys_array(py, b.atmosphere_temperature_sun_mult_curve))?;
+    let e = &spec.engines[0];
+    d.set_item("isp_keys", keys_array(py, &e.isp_keys[..e.n_isp_keys as usize]))?;
+    d.set_item("radius", b.radius)?;
+    d.set_item("gm", b.gm())?;
+    d.set_item("omega", b.angular_velocity())?;
+    d.set_item("atmosphere_depth", b.atmosphere_depth)?;
+    d.set_item("molar_mass", b.atm_molar_mass)?;
+    d.set_item("adiabatic_index", b.atm_adiabatic_index)?;
+    d.set_item("gas_constant", body::IDEAL_GAS_CONSTANT)?;
+    d.set_item("g0", engine::ENGINE_G0)?;
+    d.set_item("max_fuel_flow", e.max_fuel_flow)?;
+    let full = spec.full_resources();
+    let mut empty = full;
+    empty[0] = 0.0;
+    empty[1] = 0.0;
+    d.set_item("wet_mass", spec.mass_props(&full).0)?;
+    d.set_item("dry_mass", spec.mass_props(&empty).0)?;
+    let pad = ksc::KSC_PAD_DECK_BODY_FIXED;
+    d.set_item("pad", [pad.x, pad.y, pad.z])?;
+    let (ee, nn, uu) = sim::pad_enu();
+    d.set_item("enu", [[ee.x, ee.y, ee.z], [nn.x, nn.y, nn.z], [uu.x, uu.y, uu.z]])?;
+    d.set_item("pad_deck_alt", ksc::KSC_PAD_DECK_ALT)?;
+    // CoM height above the ground when the legs just touch (landing reference)
+    let (_, com_l, _) = spec.mass_props(&full);
+    d.set_item("com_height_at_touchdown", com_l.y - spec.bottom_y)?;
+    // CdA_base(mach) from the full 6-DOF sim (engine-first axial flow at 100 m, sun offset off)
+    let prm = Params { ground: false, sun_temperature: false, ..Params::default() };
+    let q = sim::attitude(uu, ee);
+    let mut machs = vec![];
+    let mut cdas = vec![];
+    for k in 0..=60 {
+        let v = 10.0 + k as f64 * 15.0;
+        let mut st = sim::state_at_pad(&spec, ksp_core::math::v3(0.0, 0.0, 100.0), ksp_core::math::v3(0.0, 0.0, -v), q, ksp_core::math::V3::ZERO, 0.0);
+        let mut st0 = st;
+        let info = sim::tick(&spec, &prm, &mut st, &sim::Control::default());
+        sim::tick(&spec, &Params { aero: false, ..prm }, &mut st0, &sim::Control::default());
+        let drag = (st.v - st0.v).dot(uu) / sim::FIXED_DT * info.mass;
+        machs.push(info.atm.mach);
+        // divide out DRAG_PSEUDOREYNOLDS(rho v) so the table is a function of mach only
+        cdas.push(drag / info.atm.q_kpa / info.atm.pseudo_re_drag_mult);
+    }
+    d.set_item("pseudo_re_keys", keys_array(py, ksp_core::aero::DRAG_PSEUDOREYNOLDS))?;
+    d.set_item("cda_mach", PyArray1::from_vec(py, machs))?;
+    d.set_item("cda", PyArray1::from_vec(py, cdas))?;
+    Ok(d)
 }
 
 #[pymodule]
@@ -237,6 +302,7 @@ fn _ksp_sim(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hopper_thrust, m)?)?;
     m.add_function(wrap_pyfunction!(hopper_info, m)?)?;
     m.add_function(wrap_pyfunction!(hopper_drop, m)?)?;
+    m.add_function(wrap_pyfunction!(point_mass_tables, m)?)?;
     m.add("OBS_DIM", OBS_DIM)?;
     m.add("ACT_DIM", ACT_DIM)?;
     m.add("FIXED_DT", sim::FIXED_DT)?;
