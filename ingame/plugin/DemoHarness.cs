@@ -94,6 +94,8 @@ namespace DemoHarness
         string mode = "free";
         // chase parameters (current, blended toward target)
         float hdg, pitch, dist, hdgRate;
+        // field of view: fixed target, or auto-zoom (ground mode) keeping `zoomSpan` metres in frame
+        float fov = 60f, fovTarget = 60f, zoomSpan;
         float tHdg, tPitch, tDist;
         double gLat, gLon, gAlt;
         // blend from the camera's world offset at command time
@@ -145,6 +147,12 @@ namespace DemoHarness
                         blendDur = f.Length > 4 ? (float)H.D(f[4]) : 0f;
                         StartBlend(cam, v);
                         mode = "ground";
+                        break;
+                    case "fov":
+                        fovTarget = (float)H.D(f[1]); zoomSpan = 0;
+                        break;
+                    case "zoom":
+                        zoomSpan = (float)H.D(f[1]);
                         break;
                     case "free":
                         mode = "free";
@@ -205,6 +213,11 @@ namespace DemoHarness
                 }
             }
             float dd = (float)off.magnitude;
+            // telephoto tracking: keep about zoomSpan metres across the frame height
+            float ft = zoomSpan > 0 ? Mathf.Clamp(2f * Mathf.Atan(zoomSpan * 0.5f / Mathf.Max(dd, 1f)) * Mathf.Rad2Deg, 6f, 60f) : fovTarget;
+            fov = Mathf.Lerp(fov, ft, Mathf.Clamp01(dt * 2.5f));
+            // every frame: KSP's own camera update resets the cameras' fieldOfView
+            cam.SetFoV(fov);
             if (dd > cam.maxDistance) { off *= cam.maxDistance / dd; dd = cam.maxDistance; }
             cam.SetCamCoordsFromPosition((Vector3)(com + off));
             cam.SetDistanceImmediate(dd);

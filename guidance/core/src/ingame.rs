@@ -76,7 +76,50 @@ pub fn design() -> BoosterDesign {
     }
 }
 
+/// Heavy booster (3.75 m, booster only, no upper stage): root = Kerbodyne S3-14400; above it
+/// ADTP-2-3 / Z-4K / large reaction wheel / RC-L01 / Mk7 nose (the dummy top), below it S3-7200 /
+/// Mammoth; six LT-2 legs on the S3-7200 offset down beside the Mammoth (VAB offset), eight
+/// airbrakes near the top of the S3-14400. `ingame/make_demo_craft.py --heavy` writes the same craft.
+pub const HEAVY_R: f64 = 1.875;
+pub const HEAVY_LEG_Y: f64 = -4.3;
+pub const HEAVY_LEG_AZ: [f64; 6] = [30.0, 90.0, 150.0, 210.0, 270.0, 330.0];
+pub const HEAVY_BRAKE_Y: f64 = 3.0;
+pub const HEAVY_BRAKE_AZ: [f64; 8] = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
+
+pub fn heavy_craft() -> Result<Craft, String> {
+    let mut c = Craft { parts: vec![Placed { def: partlib::load("Size3LargeTank")?, pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![], parent: None }] };
+    let med = c.stack_below(0, partlib::load("Size3MediumTank")?);
+    let _eng = c.stack_below(med, partlib::load("Size3EngineCluster")?);
+    let mut top = place_above(&mut c, 0, partlib::load("Size3To2Adapter_v2")?);
+    for n in ["batteryBankLarge", "asasmodule1-2", "probeStackLarge", "rocketNoseCone_v2"] {
+        top = place_above(&mut c, top, partlib::load(n)?);
+    }
+    for az in HEAVY_LEG_AZ {
+        c.surface_attach_editor(med, parts::lt2_leg(), az, HEAVY_R, HEAVY_LEG_Y, LT2_NODE_POS, LT2_NODE_DIR);
+    }
+    for az in HEAVY_BRAKE_AZ {
+        c.surface_attach_editor(0, parts::airbrake(), az, HEAVY_R, HEAVY_BRAKE_Y, parts::AIRBRAKE_NODE.0, parts::AIRBRAKE_NODE.1);
+    }
+    Ok(c)
+}
+
+/// `KSPG_CRAFT=heavy` selects the heavy booster everywhere (MC, bridge).
+pub fn heavy() -> bool {
+    std::env::var("KSPG_CRAFT").is_ok_and(|v| v == "heavy")
+}
+
 pub fn built() -> Result<Built, String> {
+    if heavy() {
+        let c = heavy_craft()?;
+        let spec = VesselSpec::compile(&c);
+        let mut d = design();
+        d.size = 3;
+        d.engine = "Size3EngineCluster".into();
+        d.tanks = vec!["Size3LargeTank".into(), "Size3MediumTank".into()];
+        d.n_legs = 6;
+        d.upper_tanks = vec![];
+        return Ok(Built { design: d, stack: spec, booster: spec, n_booster: c.parts.len() });
+    }
     let (s, b, n_booster) = crafts()?;
     let booster = VesselSpec::compile(&b);
     let mut stack = VesselSpec::compile(&s);
@@ -140,7 +183,18 @@ pub fn bridge_from_state(st: &EnvState, spec: &VesselSpec) -> Vec<f64> {
     x
 }
 
+/// Heavy booster profile (MC-tuned, see INGAME_FLIGHT_NOTES.md): 60 % propellant load, steeper
+/// pitch program, MECO at twice the return budget, ascent at TWR 1.8 -> separation ~21 km,
+/// ~650 m/s, apogee ~41 km.
+pub const HEAVY_LOAD: f64 = 0.6;
+pub const HEAVY_TURN_ALT: f64 = 90_000.0;
+pub const HEAVY_MECO_MARGIN: f64 = 2.0;
+pub const HEAVY_ASCENT_TWR: f64 = 1.8;
+
 /// Nominal (dispersion-free) flight for the game: the middle of `sample_dispersion`'s ranges.
 pub fn nominal_dispersion(ut: f64) -> Dispersion {
+    if heavy() {
+        return Dispersion { ut, heading_deg: 90.0, kick_speed: 65.0, kick_deg: 5.0, turn_alt: HEAVY_TURN_ALT, turn_exp: 0.525, meco_margin: HEAVY_MECO_MARGIN, fuel_load: HEAVY_LOAD, ..Default::default() };
+    }
     Dispersion { ut, heading_deg: 90.0, kick_speed: 65.0, kick_deg: 5.0, turn_alt: 60_000.0, turn_exp: 0.525, meco_margin: 1.3, fuel_load: 1.0, ..Default::default() }
 }

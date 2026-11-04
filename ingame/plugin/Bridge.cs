@@ -28,7 +28,7 @@ namespace DemoHarness
         HashSet<Part> upper = new HashSet<Part>();
         ModuleEngines eng;
         ModuleGimbal gim;
-        ModuleReactionWheel rw;
+        List<ModuleReactionWheel> rws = new List<ModuleReactionWheel>();
         DemoCamera cam;
         TraceLogger logger;
         bool active, engineOn, decoupled, done;
@@ -60,11 +60,9 @@ namespace DemoHarness
                 if (upper.Contains(p)) continue;
                 var e = p.FindModuleImplementing<ModuleEngines>();
                 if (e != null && eng == null) { eng = e; gim = p.FindModuleImplementing<ModuleGimbal>(); }
-                var w = p.FindModuleImplementing<ModuleReactionWheel>();
-                if (w != null && rw == null) rw = w;
+                rws.AddRange(p.FindModulesImplementing<ModuleReactionWheel>());
             }
             H.Log("bridge: engine " + (eng != null ? eng.part.name : "none") + " decoupler " + (decoupler != null) + " upper parts " + upper.Count);
-            Cam("ground -0.1087 -74.5617 85 0");
             // legs down (the sim's legs are always deployed), settle on the pad
             v.ActionGroups.SetGroup(KSPActionGroup.Gear, true);
             v.ActionGroups.SetGroup(KSPActionGroup.Brakes, false);
@@ -88,6 +86,8 @@ namespace DemoHarness
             Logging = true;
             v.OnFlyByWire += Fly;
             active = true;
+            // clean frame: hide the KSP UI (what F2 does)
+            GameEvents.onHideUI.Fire();
             H.Log("bridge: flying " + runName);
         }
 
@@ -133,7 +133,10 @@ namespace DemoHarness
             a(H.R(lf)); a(H.R(ox)); a(H.R(mono)); a(H.R(ec));
             a(H.R(eng != null ? eng.currentThrottle : 0));
             a(gim != null ? H.R(gim.actuation.x) + " " + H.R(gim.actuation.z) : "0 0");
-            a(rw != null ? V(rw.inputVector) : "0 0 0");
+            // the sim lumps all wheels into one (torque = sum): send the summed input vectors
+            Vector3 rwsum = Vector3.zero;
+            foreach (var w in rws) if (w.part.vessel == v) rwsum += w.inputVector;
+            a(V(rwsum));
             a(v.Landed ? "1" : "0");
             a(V(BF(b, Krakensbane.GetFrameVelocity())));
             return sb.ToString().TrimEnd();
@@ -184,37 +187,75 @@ namespace DemoHarness
             if (!done && f[8] == "1") { done = true; doneAt = Time.realtimeSinceStartup; H.Log("bridge: guidance done " + reply); }
         }
 
-        float t0 = -1;
-        bool landCam;
+        // ---- camera director: phase + height driven, cinematic defaults ----------------------------
+        // ground positions (lat, lon, alt ASL) around the pad (deck 72.45 m ASL)
+        const string CamLiftoff = "ground -0.1155 -74.5637 84 0";   // ~190 m S, 65 m W, low
+        const string CamApproach = "ground -0.1110 -74.5640 88 0";  // ~145 m S, 70 m W
+        const string CamPad = "ground -0.1003 -74.5600 78 0";       // ~33 m S, 25 m W, deck level
+        int stage = -1;
+        int boostbacks;
+        void Director()
+        {
+            if (v == null) return;
+            double h = v.altitude - 72.45;
+            int want = stage;
+            if (phase == 0) want = h < 2500 ? 0 : 1;
+            else if (phase == 1 || (phase == 2 && boostbacks <= 1)) want = 2;
+            else if (phase >= 3 || phase == 2) want = 3;
+            if (phase >= 3 || (phase == 2 && boostbacks > 1)) { if (h < 1500 && v.verticalSpeed < 0) want = 4; if (h < 120) want = 5; }
+            if (stage == 5) want = 5;
+            if (want == stage) return;
+            if (want < stage && stage >= 4) return;
+            stage = want;
+            switch (stage)
+            {
+                case 0: Cam(CamLiftoff); Cam("zoom 90"); break;                    // tracking telephoto from the ground
+                case 1: Cam("fov 55"); Cam("chase 205 -12 130 4"); break;          // chase from below-side, plume in frame
+                case 2: Cam("fov 50"); Cam("chase 165 8 95 4 1.5"); break;         // side view: flip and boostback burn
+                case 3: Cam("fov 50"); Cam("chase 250 50 90 5"); break;             // over the shoulder, ground below
+                case 4: Cam(CamApproach); Cam("zoom 110"); break;                  // cut: telephoto from the ground
+                case 5: Cam(CamPad); Cam("zoom 70"); break;                        // cut: close pad shot for touchdown
+            }
+            H.Log("bridge: camera stage " + stage + " at h " + h.ToString("F0"));
+        }
+
         void OnPhase(int ph)
         {
             H.Log("bridge: phase " + phase + " -> " + ph);
             phase = ph;
-            switch (ph)
-            {
-                case 1: Cam("chase 160 10 35 2"); break;           // flip
-                case 2: Cam("chase 180 25 150 4 4"); break;        // boostback: wide, slow orbit
-                case 3: Cam("chase 200 35 70 4 2"); break;         // coast
-                case 4: Cam("chase 270 65 45 4"); break;           // aero descent
-            }
+            if (ph == 2) boostbacks++;
         }
 
         void Update()
         {
-            if (!active && !done) return;
-            if (v != null && phase == 0 && t0 < 0) t0 = Time.time;
-            if (phase == 0 && t0 >= 0 && Time.time - t0 > 12 && Time.time - t0 < 13) Cam("chase 200 -5 45 4");
-            if (!landCam && phase >= 3 && v != null && v.altitude < 2600)
-            {
-                landCam = true;
-                Cam("ground -0.1033 -74.5627 80.5 3");
-            }
-            if (done && Time.realtimeSinceStartup - doneAt > 10f)
+            if (active || done) Director();
+            if (done && Time.realtimeSinceStartup - doneAt > 8f)
             {
                 done = false;
                 active = false;
                 Finish();
             }
+        }
+
+        // minimal overlay: altitude above the pad and speed, small, lower left
+        GUIStyle style, shadow;
+        void OnGUI()
+        {
+            if (v == null || (!active && !done) || phase < 0) return;
+            if (style == null)
+            {
+                style = new GUIStyle(GUI.skin.label) { fontSize = Mathf.RoundToInt(Screen.height / 45f), fontStyle = FontStyle.Normal };
+                style.normal.textColor = new Color(1f, 1f, 1f, 0.92f);
+                shadow = new GUIStyle(style);
+                shadow.normal.textColor = new Color(0f, 0f, 0f, 0.55f);
+            }
+            double h = Math.Max(0, v.altitude - 72.45 - 5.0);
+            string alt = h >= 1000 ? (h / 1000).ToString("F1") + " km" : h.ToString("F0") + " m";
+            string txt = "ALT  " + alt + "     SPD  " + v.srfSpeed.ToString("F0") + " m/s";
+            float x = Screen.width * 0.03f, y = Screen.height * 0.93f;
+            var r = new Rect(x, y, Screen.width * 0.5f, style.fontSize * 2f);
+            GUI.Label(new Rect(r.x + 1.5f, r.y + 1.5f, r.width, r.height), txt, shadow);
+            GUI.Label(r, txt, style);
         }
 
         void Finish()

@@ -60,6 +60,25 @@ pub fn effectiveness(spec: &VesselSpec, st: &EnvState, nav: &Nav, throttle: f64)
             }
             // ksp-core sim.rs 3a (game-measured): pitch about root +X by s*range, yaw about root
             // +Z by -s*range, thrust transform swinging about the gimbal pivot
+            if e.n_nozzles > 1 {
+                // multi-nozzle engine (ksp-core sim.rs 3a): each nozzle gimbals itself, the roll
+                // input mixed into the off-axis nozzles' pitch / yaw (ModuleGimbal.GimbalRotation)
+                let share = thrust / e.n_nozzles as f64;
+                let r = e.gimbal_range_deg;
+                let tq = |j: usize, ax: f64, az: f64| -> V3 {
+                    let gq = Quat::angle_axis(ax, v3(1.0, 0.0, 0.0)) * Quat::angle_axis(-az, v3(0.0, 0.0, 1.0));
+                    (e.nozzles[j] - nav.com_l).cross(gq.rotate(e.dir) * share)
+                };
+                for j in 0..e.n_nozzles as usize {
+                    let s = if nav.com_l.y > e.nozzles[j].y { 1.0 } else { -1.0 };
+                    let [rx, rz] = e.nozzle_roll[j];
+                    let t0 = tq(j, 0.0, 0.0);
+                    out.b[0] += tq(j, s * r, 0.0) - t0;
+                    out.b[1] += tq(j, 0.0, s * r) - t0;
+                    out.b[2] += tq(j, (rx * r).clamp(-r, r), (rz * r).clamp(-r, r)) - t0;
+                }
+                continue;
+            }
             let sgn = if nav.com_l.y > e.pos.y { 1.0 } else { -1.0 };
             let tq = |gq: Quat| -> V3 { (e.pivot + gq.rotate(e.pos - e.pivot) - nav.com_l).cross(gq.rotate(e.dir) * thrust) };
             let t0 = tq(Quat::IDENTITY);

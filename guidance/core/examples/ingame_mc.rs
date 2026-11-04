@@ -28,6 +28,12 @@ fn main() {
             if let Some(m) = margin {
                 d.meco_margin = m;
             }
+            if let Some(t) = std::env::var("MC_TURN").ok().and_then(|s| s.parse::<f64>().ok()) {
+                d.turn_alt = t;
+            }
+            if let Some(l) = std::env::var("MC_LOAD").ok().and_then(|s| s.parse::<f64>().ok()) {
+                d.fuel_load = l;
+            }
             Flight::new(sh.clone(), d, cfg)
         })
         .collect();
@@ -66,8 +72,8 @@ fn main() {
             vz.push(-s.td_vz);
         }
         if std::env::var("MC_VERBOSE").is_ok() || (x.outcome != Outcome::Landed && i < 2000) && std::env::var("MC_FAILS").is_ok() {
-            println!("#{i:<5} {:?} miss {m:7.2} td_vz {:5.2} td_vh {:5.2} tilt {:4.1} ign_err {:6.1} entry {:6.1} bb_end {:6.1} prop {:5.2} sep {:5.0}m {:4.0}m/s apo {:5.0} margin {:.2} load {:.2} kick {:.0}/{:.1} turn {:.0}/{:.2} ut {:.0} derr {:.3} terr {:.3} sepdv {:.2}",
-                x.outcome, s.td_vz, s.td_vh, s.td_tilt_deg, s.ign_err, s.entry_err, s.bb_end_err, s.prop_left, s.sep_alt, s.sep_speed, s.apo_alt, x.disp.meco_margin, x.disp.fuel_load, x.disp.kick_speed, x.disp.kick_deg, x.disp.turn_alt, x.disp.turn_exp, x.disp.ut % 21600.0, x.disp.drag_err, x.disp.thrust_err, x.disp.sep_dv.norm());
+            println!("#{i:<5} {:?} miss {m:7.2} e {:6.2} n {:6.2} td_vz {:5.2} td_vh {:5.2} tilt {:4.1} ign_err {:6.1} entry {:6.1} bb_end {:6.1} prop {:5.2} sep {:5.0}m {:4.0}m/s apo {:5.0} margin {:.2} load {:.2} kick {:.0}/{:.1} turn {:.0}/{:.2} ut {:.0} derr {:.3} terr {:.3} sepdv {:.2}",
+                x.outcome, s.final_e, s.final_n, s.td_vz, s.td_vh, s.td_tilt_deg, s.ign_err, s.entry_err, s.bb_end_err, s.prop_left, s.sep_alt, s.sep_speed, s.apo_alt, x.disp.meco_margin, x.disp.fuel_load, x.disp.kick_speed, x.disp.kick_deg, x.disp.turn_alt, x.disp.turn_exp, x.disp.ut % 21600.0, x.disp.drag_err, x.disp.thrust_err, x.disp.sep_dv.norm());
         }
     }
     let pct = |v: &mut Vec<f64>, p: f64| {

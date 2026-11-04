@@ -15,14 +15,20 @@ export KSP_DIR=$K
 (cd "$REPO/guidance" && nice -n 10 cargo build -q --release --example bridge) || exit 1
 cp "$HERE/plugin/bin/Release/net472/DemoHarness.dll" "$K/GameData/DemoHarness/Plugins/"
 rm -f "$K/GameData/DemoHarness/demo_kos.cfg"
-"$REPO/.venv/bin/python" -I "$HERE/make_demo_craft.py" "$K/Ships/VAB" > /dev/null
+CRAFT=RTLSDemo.craft
+if [ "${KSPG_CRAFT:-}" = heavy ]; then
+  CRAFT=HeavyDemo.craft
+  "$REPO/.venv/bin/python" -I "$HERE/make_demo_craft.py" "$K/Ships/VAB" --heavy > /dev/null
+else
+  "$REPO/.venv/bin/python" -I "$HERE/make_demo_craft.py" "$K/Ships/VAB" > /dev/null
+fi
 while pgrep -x KSP.x86_64 >/dev/null; do echo "another KSP is running, waiting..."; sleep 20; done
 stamp=$(date +%Y%m%d_%H%M%S)
 mkdir -p "$HERE/telemetry"
 export BRIDGE_LOG="$HERE/telemetry/bridge_${stamp}.csv"
 "$REPO/guidance/target/release/examples/bridge" > "$HERE/telemetry/bridge_${stamp}.log" 2>&1 &
 bpid=$!
-echo RTLSDemo.craft > "$K/GameData/DemoHarness/launch.txt"
+echo "$CRAFT" > "$K/GameData/DemoHarness/launch.txt"
 rm -f "$K/KSP_player.log"
 sed -i "s/^SCREEN_RESOLUTION_WIDTH = .*/SCREEN_RESOLUTION_WIDTH = $W/; s/^SCREEN_RESOLUTION_HEIGHT = .*/SCREEN_RESOLUTION_HEIGHT = $H/" "$K/settings.cfg"
 export DISPLAY=:1 XAUTHORITY=$(ls /run/user/$(id -u)/xauth_* | head -1)
@@ -36,8 +42,8 @@ if [ -n "${RECORD:-}" ]; then
   wid=$(xdotool search --pid $pid 2>/dev/null | tail -1)
   echo "recording window $wid ($(xwininfo -id "$wid" | grep -E 'Width|Height' | tr -s ' ' | tr '\n' ' ')) -> $RECORD.raw.mkv"
   # Xwayland: the root window reads back black; grab the KSP window itself
-  nice -n 5 ffmpeg -y -loglevel error -f x11grab -window_id "$wid" -draw_mouse 0 -framerate 30 -i "$DISPLAY" \
-    -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p "$RECORD.raw.mkv" &
+  nice -n 5 ffmpeg -y -loglevel error -f x11grab -window_id "$wid" -draw_mouse 0 -framerate ${FPS:-60} -i "$DISPLAY" \
+    -c:v libx264 -preset ultrafast -crf 16 -pix_fmt yuv420p "$RECORD.raw.mkv" &
   fpid=$!
 fi
 wait $pid

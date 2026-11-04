@@ -69,7 +69,8 @@ pub struct GuidanceConfig {
 
 impl Default for GuidanceConfig {
     fn default() -> Self {
-        GuidanceConfig { landing: LandingMode::Baseline, f_ign: 0.7, v_td: 1.5, record: false, stop_at_ignition: false }
+        let f_ign = std::env::var("KSPG_F_IGN").ok().and_then(|s| s.parse().ok()).unwrap_or(0.3);
+        GuidanceConfig { landing: LandingMode::Baseline, f_ign, v_td: 1.5, record: false, stop_at_ignition: false }
     }
 }
 
@@ -239,7 +240,14 @@ pub struct Flight {
     pub ext_ctl: Control,
     /// the guidance separated the stages this tick (the game must fire the decoupler)
     pub ext_decouple: bool,
+    /// final-segment latch (baseline_accel takes &self): checked once at `vertical_final_m()`
+    vert_checked: bool,
+    vert_latched: bool,
 }
+
+/// lateral error (m) at `vertical_final_m()` above which the booster gives up the pad and lands
+/// vertically where it is
+pub const VERT_LATCH_M: f64 = 40.0;
 
 /// dynamic pressure (kPa) at which the coast hands over to the aero descent law
 /// (`KSPG_DESCENT_Q` overrides, for sweeps)
@@ -252,7 +260,20 @@ pub fn descent_q_kpa() -> f64 {
 /// (`KSPG_AIM_LONG` overrides)
 pub fn aim_long_frac() -> f64 {
     static Q: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *Q.get_or_init(|| std::env::var("KSPG_AIM_LONG").ok().and_then(|s| s.parse().ok()).unwrap_or(0.05))
+    *Q.get_or_init(|| std::env::var("KSPG_AIM_LONG").ok().and_then(|s| s.parse().ok()).unwrap_or(if crate::ingame::heavy() { 0.02 } else { 0.05 }))
+}
+
+/// height (m above the touchdown point) below which the landing burn only descends vertically
+/// (`KSPG_VFINAL` overrides; 0 disables)
+pub fn vertical_final_m() -> f64 {
+    static Q: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *Q.get_or_init(|| std::env::var("KSPG_VFINAL").ok().and_then(|s| s.parse().ok()).unwrap_or(100.0))
+}
+
+/// ascent thrust-to-weight cap (`KSPG_ASCENT_TWR`; unset = full throttle)
+pub fn ascent_twr() -> Option<f64> {
+    static Q: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *Q.get_or_init(|| std::env::var("KSPG_ASCENT_TWR").ok().and_then(|s| s.parse().ok()).or(crate::ingame::heavy().then_some(crate::ingame::HEAVY_ASCENT_TWR)))
 }
 
 /// `KSPG_DEBUG=1` prints guidance internals (single-flight debugging).
@@ -310,6 +331,8 @@ impl Flight {
             external: false,
             ext_ctl: Control::default(),
             ext_decouple: false,
+            vert_checked: false,
+            vert_latched: false,
         }
     }
 
@@ -397,7 +420,13 @@ impl Flight {
         // finite burn + flip losses: 10 % on the boostback
         let ve_vac = propulsion(&b, 0.0).isp * ENGINE_G0;
         let m_after = m_b * (-1.1 * dv.norm() / ve_vac).exp();
+        // the MECO budget plans the landing burn at the classic 0.7 ignition fraction: the actual
+        // (earlier, gentler) burn needs a little more propellant, which the margin covers, and a
+        // budget at the low fraction cuts the ascent short into a low, dense-air arc
+        let f = self.cfg.f_ign;
+        self.cfg.f_ign = f.max(0.7);
         let p = self.pip_at(&nb, nb.v + dv, m_after, (0.0, 0.0));
+        self.cfg.f_ign = f;
         if debug() {
             eprintln!("  t {:.1} budget: dv {:.0} err {:.1} m_b {:.2} m_after {:.2} m_td {:.2} ok {} dry {} have {:.2}", self.st.ut - self.disp.ut, dv.norm(), err, m_b, m_after, p.m, p.ok, p.dry, have);
         }
@@ -782,6 +811,23 @@ impl Flight {
         let zem = v3(-6.0 * r.x / (t_h * t_h) - 4.0 * v.x / t_h, -6.0 * r.y / (t_h * t_h) - 4.0 * v.y / t_h, 0.0);
         let lim = self.tilt_limit(n).tan() * az.max(0.0);
         let mut ah = if r.z > hh || (zem.x * zem.x + zem.y * zem.y).sqrt() <= lim { zem } else { v3(-v.x, -v.y, 0.0) * (1.0 / (2.0 * self.t_settle).max(0.8)) };
+        // last ~100 m: vertical descent. Kill the drift, trim position only gently (capped at a
+        // couple of degrees of tilt): a booster still far off lands softly beside the pad rather
+        // than skimming sideways into it near the ground
+        let h_vert = vertical_final_m();
+        if r.z < h_vert && self.vert_latched {
+            let kill = v3(-v.x, -v.y, 0.0) * (1.0 / (2.0 * self.t_settle).max(0.8));
+            let trim = v3(-r.x, -r.y, 0.0) * 0.04;
+            let cap = 2f64.to_radians().tan() * az.max(0.0);
+            let tm = (trim.x * trim.x + trim.y * trim.y).sqrt();
+            let trim = if tm > 0.5 * cap { trim * (0.5 * cap / tm) } else { trim };
+            let mut a2 = kill + trim;
+            let m2 = (a2.x * a2.x + a2.y * a2.y).sqrt();
+            if m2 > cap {
+                a2 = a2 * (cap / m2);
+            }
+            ah = a2;
+        }
         ah.x -= grav.x;
         ah.y -= grav.y;
         v3(ah.x, ah.y, az)
@@ -917,7 +963,16 @@ impl Flight {
         match self.phase {
             Phase::Ascent => {
                 self.cmd_dir = self.ascent_dir(&n);
-                self.cmd_thr = 1.0;
+                // optional thrust-to-weight cap on the ascent (`KSPG_ASCENT_TWR`): a light booster
+                // with a big engine otherwise climbs at 4-5 g through max-q
+                self.cmd_thr = match ascent_twr() {
+                    Some(twr) => {
+                        let pr = propulsion(self.spec(), p_atm(n.alt));
+                        let g = KERBIN.gm() / n.x.norm2();
+                        if pr.thrust > 0.0 { (twr * n.m * g / pr.thrust).clamp(0.05, 1.0) } else { 1.0 }
+                    }
+                    None => 1.0,
+                };
                 if due {
                     let (p, cap) = propellant(&self.sh.built.booster, &self.st.res);
                     // the budget only matters once the booster is past half its load
@@ -1082,6 +1137,13 @@ impl Flight {
                 }
             }
             Phase::LandingBurn => {
+                if !self.vert_checked {
+                    let (r, _, _) = self.landing_state(&n);
+                    if r.z < vertical_final_m() {
+                        self.vert_checked = true;
+                        self.vert_latched = (r.x * r.x + r.y * r.y).sqrt() > VERT_LATCH_M;
+                    }
+                }
                 let a_cmd = match self.cfg.landing {
                     LandingMode::Baseline => self.baseline_accel(&n),
                     LandingMode::Gfold => self.gfold_accel(&n),

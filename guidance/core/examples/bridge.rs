@@ -38,6 +38,7 @@ fn main() {
         let mut flight: Option<Flight> = None;
         let mut line = String::new();
         let mut tick = 0u64;
+        let mut hop_state = HopState::default();
         let pad = Pad::ksc();
         loop {
             line.clear();
@@ -63,15 +64,21 @@ fn main() {
             let st = ingame::state_from_bridge(&x, &spec);
             let thrust_est = 0.0;
             let hold = std::env::var("BRIDGE_HOLD").is_ok();
+            let hop = std::env::var("BRIDGE_HOP").is_ok();
             let ctl = if hold {
                 // pad-only plumbing check: never light the engine, just log what the guidance sees
                 fl.st = st;
                 ksp_core::sim::Control::default()
+            } else if hop {
+                // validation hop (INGAME_FLIGHT_NOTES.md "HeavyPadHop"): settle, climb ~15 m,
+                // hover with pitch / yaw / roll steps, slow descent, engine off on contact
+                fl.st = st;
+                hop_ctl(&mut hop_state, &spec, &fl.st, tick)
             } else {
                 fl.step_external(st, thrust_est)
             };
             let brakes = fl.st.brakes;
-            let done = fl.done() || (hold && tick >= 1000);
+            let done = fl.done() || (hold && tick >= 1000) || (hop && hop_state.done_tick.is_some_and(|d| tick > d + 250));
             let reply = format!(
                 "C {:.6} {:.6} {:.6} {:.6} {} {} {} {}\n",
                 ctl.throttle, ctl.pitch, ctl.yaw, ctl.roll, brakes as u8, fl.ext_decouple as u8, fl.phase as u8, done as u8
@@ -98,4 +105,48 @@ fn main() {
             eprintln!("bridge: client gone; outcome {:?}\n{:#?}", fl.outcome, fl.stats);
         }
     }
+}
+
+#[derive(Default)]
+struct HopState {
+    h0: Option<f64>,
+    lit: bool,
+    landed_from: Option<u64>,
+    done_tick: Option<u64>,
+}
+
+/// Scripted validation hop (ticks at 50 Hz): 0-8 s settle; climb at 3 m/s to 15 m; hover with
+/// 0.5 s steps of pitch +0.4 (t 16 s), yaw +0.4 (20 s), roll +0.6 (24 s) on top of the attitude
+/// hold; from 30 s descend at 1.5 m/s; engine off on ground contact.
+fn hop_ctl(hs: &mut HopState, spec: &ksp_core::vessel::VesselSpec, st: &ksp_core::sim::EnvState, tick: u64) -> ksp_core::sim::Control {
+    use ksp_core::sim::Control;
+    let n = ksp_guidance::nav::nav(spec, st);
+    let up = n.x.normalized();
+    let h0 = *hs.h0.get_or_insert(n.alt);
+    let h = n.alt - h0;
+    let vz = n.v.dot(up);
+    let t = tick as f64 * 0.02;
+    if t < 8.0 || hs.done_tick.is_some() {
+        return Control::default();
+    }
+    let pr = ksp_guidance::nav::propulsion(spec, ksp_guidance::nav::p_atm(n.alt));
+    let g = 9.81;
+    let vz_t = if t < 30.0 { if h < 15.0 { 3.0f64.min(0.6 * (15.0 - h) + 0.3) } else { 0.0 } } else { -1.5 };
+    let thr = if pr.thrust > 0.0 { (n.m * (g + 1.5 * (vz_t - vz)) / pr.thrust).clamp(0.02, 1.0) } else { 0.0 };
+    if t > 31.0 && st.status != ksp_core::sim::STATUS_FLYING {
+        let lf = *hs.landed_from.get_or_insert(tick);
+        if tick > lf + 5 {
+            hs.done_tick = Some(tick);
+            return Control::default();
+        }
+    }
+    hs.lit = true;
+    let o = ksp_guidance::attitude::point(spec, st, &n, up, thr, false);
+    let mut c = o.ctl;
+    c.throttle = thr;
+    let step = |t0: f64| t >= t0 && t < t0 + 0.5;
+    if step(16.0) { c.pitch = 0.4; }
+    if step(20.0) { c.yaw = 0.4; }
+    if step(24.0) { c.roll = 0.6; }
+    c
 }

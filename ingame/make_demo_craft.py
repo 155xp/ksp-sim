@@ -63,6 +63,14 @@ NODES = {
     "batteryBank": (0.1108553, -0.1108553),        # Z-1k
     "advSasModule": (0.1990267, -0.1990267),       # small inline reaction wheel
     "noseCone": (0.0, 0.0),                        # aerodynamic nose cone (bottom node at 0)
+    "rocketNoseCone_v2": (0.0, 0.0),               # Mk7 2.5 m nose (bottom node at 0)
+    "probeStackLarge": (0.19, -0.19),              # RC-L01
+    "asasmodule1-2": (0.25, -0.25),                # large reaction wheel
+    "batteryBankLarge": (0.11, -0.142),            # Z-4K
+    "Size3To2Adapter_v2": (1.15017, -1.1),         # ADTP-2-3
+    "Size3LargeTank": (3.74, -3.74),               # S3-14400
+    "Size3MediumTank": (1.931, -1.937),            # S3-7200
+    "Size3EngineCluster": (1.527248, 0.0),         # Mammoth (top node only)
     "fuelTank_long": (1.875, -1.8875),             # FL-T800
     "fuelTank": (0.981725, -0.9125),               # FL-T400
     "liquidEngine2_v2": (0.0, -1.63),              # Swivel
@@ -93,7 +101,11 @@ def surface(name, parent, az_deg, y_off, node_pos, node_dir, radius=R_125):
     return {"name": name, "pos": hit - q_rot(rot, node_pos), "rot": rot, "srf": True}
 
 
-def write(path, ship, parts, parent, stage_of):
+# propellant capacities (LiquidFuel, Oxidizer) of the tanks the heavy booster loads partially
+TANKS = {"Size3LargeTank": (6480.0, 7920.0), "Size3MediumTank": (3240.0, 3960.0), "Size3To2Adapter_v2": (1350.0, 1650.0)}
+
+
+def write(path, ship, parts, parent, stage_of, load=None):
     ids = [f"{p['name'].replace('_', '.')}_{4293000000 + i}" for i, p in enumerate(parts)]
     kids = {i: [j for j, p in parent.items() if p == i] for i in range(len(parts))}
     lines = [f"ship = {ship}", "version = 1.12.5", "description = ksp-sim in-game RTLS demo", "type = VAB",
@@ -122,6 +134,10 @@ def write(path, ship, parts, parent, stage_of):
                 if not parts[c].get("srf"):
                     above = parts[c]["pos"][1] > p["pos"][1]
                     lines.append(f"\tattN = {'top' if above else bottom_node},{ids[c]}")
+        if load is not None and p["name"] in TANKS:
+            for rn, cap in zip(("LiquidFuel", "Oxidizer"), TANKS[p["name"]]):
+                lines += ["\tRESOURCE", "\t{", f"\t\tname = {rn}", f"\t\tamount = {cap * load!r}", f"\t\tmaxAmount = {cap!r}",
+                          "\t\tflowState = True", "\t\tisTweakable = True", "\t\thideFlow = False", "\t\tisVisible = True", "\t\tflowMode = Both", "\t}"]
         lines += ["}"]
     open(path, "w").write("\n".join(lines) + "\n")
 
@@ -164,5 +180,36 @@ def main(out):
         print(p["name"], np.round(p["pos"], 4), np.round(p["rot"], 4))
 
 
+def main_heavy(out):
+    # Same craft as guidance/core/src/ingame.rs heavy_craft(): root = S3-14400.
+    parts = [{"name": "Size3LargeTank", "pos": np.array([0.0, 20.0, 0.0]), "rot": (0.0, 0.0, 0.0, 1.0)}]
+    parent = {}
+    def below(pi, name):
+        _, pb = NODES[parts[pi]["name"]]
+        ct, _ = NODES[name]
+        parts.append({"name": name, "pos": np.array([0.0, parts[pi]["pos"][1] + pb - ct, 0.0]), "rot": (0.0, 0.0, 0.0, 1.0)})
+        parent[len(parts) - 1] = pi
+        return len(parts) - 1
+    med = below(0, "Size3MediumTank")
+    eng = below(med, "Size3EngineCluster")
+    top = place_above(parts, 0, "Size3To2Adapter_v2"); parent[top] = 0
+    for n in ["batteryBankLarge", "asasmodule1-2", "probeStackLarge", "rocketNoseCone_v2"]:
+        t = place_above(parts, top, n); parent[t] = top; top = t
+    R, LEG_Y, BRAKE_Y = 1.875, -4.3, 3.0
+    for az in (30.0, 90.0, 150.0, 210.0, 270.0, 330.0):
+        parent[len(parts)] = med
+        parts.append(surface("landingLeg1-2", parts[med], az, LEG_Y, LT2_NODE_POS, LT2_NODE_DIR, radius=R))
+    for az in (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0):
+        parent[len(parts)] = 0
+        parts.append(surface("airbrake1", parts[0], az, BRAKE_Y, AB_NODE_POS, AB_NODE_DIR, radius=R))
+    # 60 % propellant (guidance ingame.rs HEAVY_LOAD)
+    write(f"{out}/HeavyDemo.craft", "Heavy Booster", parts, parent, {eng: 0}, load=0.6)
+    for p in parts:
+        print(p["name"], np.round(p["pos"], 4), np.round(p["rot"], 4))
+
+
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if "--heavy" in sys.argv:
+        main_heavy(sys.argv[1])
+    else:
+        main(sys.argv[1])

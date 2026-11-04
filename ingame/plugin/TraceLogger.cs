@@ -121,7 +121,7 @@ namespace DemoHarness
                 if (p.attachJoint != null && p.attachJoint.Joint != null)
                 {
                     var j = p.attachJoint.Joint;
-                    sb.AppendLine(" joint = " + j.GetType().Name + " breakForce=" + H.R(j.breakForce) + " xDrive=" + H.R(j.angularXDrive.positionSpring) + "," + H.R(j.angularXDrive.positionDamper) + " yzDrive=" + H.R(j.angularYZDrive.positionSpring) + " linX=" + H.R(j.xDrive.positionSpring) + " motion=" + j.xMotion + "," + j.angularXMotion + " rigid=" + p.rigidAttachment);
+                    sb.AppendLine(" joint = " + j.GetType().Name + " breakForce=" + H.R(j.breakForce) + " xDrive=" + H.R(j.angularXDrive.positionSpring) + "," + H.R(j.angularXDrive.positionDamper) + " yzDrive=" + H.R(j.angularYZDrive.positionSpring) + " linX=" + H.R(j.xDrive.positionSpring) + " motion=" + j.xMotion + "," + j.angularXMotion + " rigid=" + p.rigidAttachment + " joints=" + (p.attachJoint != null && p.attachJoint.joints != null ? p.attachJoint.joints.Count : 0));
                 }
                 var dc = p.DragCubes;
                 if (dc != null && dc.Cubes != null)

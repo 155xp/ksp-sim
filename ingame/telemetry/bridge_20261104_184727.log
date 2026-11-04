@@ -1,0 +1,48 @@
+bridge: listening on 127.0.0.1:7777
+bridge: client connected
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: done Running Stats { sep_t: 0.0, sep_alt: 0.0, sep_speed: 0.0, sep_vh: 0.0, sep_vz: 0.0, sep_downrange: 0.0, sep_mass: 0.0, sep_prop_frac: 0.0, bb_dv_plan: 0.0, bb_dv_used: 0.0, bb_end_err: 0.0, apo_alt: 0.0, entry_err: 0.0, ign_alt: 0.0, ign_speed: 0.0, ign_err: 0.0, ign_t: 0.0, td_t: 0.0, td_e: 0.0, td_n: 0.0, td_vz: 0.0, td_vh: 0.0, td_tilt_deg: 0.0, final_e: 0.0, final_n: 0.0, final_tilt_deg: 0.0, prop_left: 0.0, prop_cap: 0.0, dv_left: 0.0, landing_dv: 0.0, max_q_descent: 0.0, gfold_solves: 0, gfold_fail: 0, trim_burns: 0, trim_dv: 0.0 }
+bridge: client gone; outcome Running
+Stats {
+    sep_t: 0.0,
+    sep_alt: 0.0,
+    sep_speed: 0.0,
+    sep_vh: 0.0,
+    sep_vz: 0.0,
+    sep_downrange: 0.0,
+    sep_mass: 0.0,
+    sep_prop_frac: 0.0,
+    bb_dv_plan: 0.0,
+    bb_dv_used: 0.0,
+    bb_end_err: 0.0,
+    apo_alt: 0.0,
+    entry_err: 0.0,
+    ign_alt: 0.0,
+    ign_speed: 0.0,
+    ign_err: 0.0,
+    ign_t: 0.0,
+    td_t: 0.0,
+    td_e: 0.0,
+    td_n: 0.0,
+    td_vz: 0.0,
+    td_vh: 0.0,
+    td_tilt_deg: 0.0,
+    final_e: 0.0,
+    final_n: 0.0,
+    final_tilt_deg: 0.0,
+    prop_left: 0.0,
+    prop_cap: 0.0,
+    dv_left: 0.0,
+    landing_dv: 0.0,
+    max_q_descent: 0.0,
+    gfold_solves: 0,
+    gfold_fail: 0,
+    trim_burns: 0,
+    trim_dv: 0.0,
+}
