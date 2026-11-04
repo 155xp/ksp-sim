@@ -659,10 +659,6 @@ impl Flight {
         (pad.vec_to_enu(g), pad.vec_to_enu(cor), pad.vec_to_enu(fa / n.m))
     }
 
-    fn natural_accel(&self, n: &Nav) -> V3 {
-        let (g, c, d) = self.natural_parts(n);
-        g + c + d
-    }
 
     /// Constant-throttle stop solution for the vertical channel from the current state.
     /// The stop is planned to end `hold_height` above touchdown; the last stretch is flown at the
@@ -1162,15 +1158,22 @@ impl Flight {
     fn gfold_accel(&mut self, n: &Nav) -> V3 {
         let (r, v, _) = self.landing_state(n);
         let t_now = self.st.ut;
+        // hand over to the baseline's terminal logic early enough for this craft's attitude lag
+        let handover = gfold::TERMINAL_TGO.max(3.0 * self.swing_time(n, 0.5));
         let need_plan = match &self.gplan {
             None => true,
-            Some(p) => t_now - p.t0 >= gfold::REPLAN_DT && p.t_go(t_now) > gfold::TERMINAL_TGO,
+            Some(p) => t_now - p.t0 >= gfold::REPLAN_DT && p.t_go(t_now) > handover,
         };
-        if need_plan && r.z > 3.0 {
+        let hh = self.hold_height();
+        if need_plan && r.z > hh + 3.0 {
             let prob = self.gfold_problem(n, r, v);
             let warm = self.gplan.as_ref().map(|p| (p.tf - (t_now - p.t0)).max(1.0));
             match gfold::plan(&prob, warm) {
                 Some(mut p) => {
+                    if debug() {
+                        let n_ = p.r.len() - 1;
+                        eprintln!("  GFOLD t {:.1} r ({:.1} {:.1} {:.1}) v ({:.1} {:.1} {:.1}) -> tf {:.2} pinpoint {} rN ({:.1} {:.1} {:.1}) mf {:.2}", t_now - self.disp.ut, r.x, r.y, r.z, v.x, v.y, v.z, p.tf, p.pinpoint, p.r[n_].x, p.r[n_].y, p.r[n_].z, p.z[n_].exp());
+                    }
                     p.t0 = t_now;
                     self.gplan = Some(p);
                     self.stats.gfold_solves += 1;
@@ -1181,14 +1184,15 @@ impl Flight {
             }
         }
         match &self.gplan {
-            Some(p) if p.t_go(t_now) > gfold::TERMINAL_TGO && r.z > 3.0 => {
+            Some(p) if p.t_go(t_now) > handover && r.z > hh => {
                 let (rp, vp, up, dp) = p.at(t_now);
-                // track: planned thrust accel + drag-model mismatch + PD on the plan
-                let a_nat = self.natural_accel(n);
-                let dmis = p.natural(vp, dp) - a_nat;
+                // requested non-gravitational acceleration: planned thrust + planned drag, plus
+                // the gravity / Coriolis the plan assumed vs now, plus PD on the plan
+                let (g, cor, _) = self.natural_parts(n);
+                let plan_grav = p.g - p.omega_enu.cross(vp) * 2.0;
                 let kp = 0.25;
                 let kd = 1.0;
-                up + dmis + (rp - r) * kp + (vp - v) * kd
+                up + dp + (plan_grav - (g + cor)) + (rp - r) * kp + (vp - v) * kd
             }
             _ => self.baseline_accel(n),
         }
@@ -1201,12 +1205,16 @@ impl Flight {
         let thrust = pr.thrust.min(pr_pad.thrust);
         let isp = pr.isp.min(pr_pad.isp);
         let (g, _, _) = self.natural_parts(n);
+        // same deceleration cap as the baseline (MAX_LANDING_G above hover)
+        let t_cap = (1.0 + MAX_LANDING_G) * 9.81 * n.m;
         gfold::Problem {
             r0: r,
             v0: v,
             m0: n.m,
             m_dry: self.sh.m_dry,
-            t_max: thrust * gfold::THRUST_MARGIN,
+            h_end: self.hold_height(),
+            t_vert: 0.0,
+            t_max: (thrust * gfold::THRUST_MARGIN).min(t_cap),
             t_min: thrust * pr.throttle_min,
             alpha: 1.0 / (isp * ENGINE_G0),
             g,

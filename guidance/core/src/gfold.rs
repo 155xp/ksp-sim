@@ -39,6 +39,12 @@ pub struct Problem<'a> {
     /// gravity + centrifugal (pad ENU, m/s^2)
     pub g: V3,
     pub v_td: f64,
+    /// the plan ends this high above the touchdown point (descending at v_td); the terminal
+    /// law flies the rest
+    pub h_end: f64,
+    /// terminal vertical descent: horizontal position and velocity are zero for the last
+    /// `t_vert` seconds of the plan (attitude lag of the craft; capped at a third of the plan)
+    pub t_vert: f64,
     pub tables: &'a AeroTables,
     pub toff: f64,
     pub omega_enu: V3,
@@ -162,12 +168,22 @@ fn solve_fixed(p: &Problem, tf: f64, d: &[V3], pinpoint: bool) -> Option<Plan> {
         // z_{k+1} - z_k + alpha dt/2 (s_k + s_{k+1}) = 0
         eq.row(&[(ix(k + 1, 6), 1.0), (ix(k, 6), -1.0), (ix(k, 10), 0.5 * p.alpha * dt), (ix(k + 1, 10), 0.5 * p.alpha * dt)], 0.0);
     }
+    // terminal vertical descent
+    if pinpoint {
+        let kv = n - ((p.t_vert.min(tf / 3.0) / dt).round() as usize).min(n);
+        for k in kv..n {
+            eq.row(&[(ix(k, 0), 1.0)], 0.0);
+            eq.row(&[(ix(k, 1), 1.0)], 0.0);
+            eq.row(&[(ix(k, 3), 1.0)], 0.0);
+            eq.row(&[(ix(k, 4), 1.0)], 0.0);
+        }
+    }
     // final state
     if pinpoint {
         eq.row(&[(ix(n, 0), 1.0)], 0.0);
         eq.row(&[(ix(n, 1), 1.0)], 0.0);
     }
-    eq.row(&[(ix(n, 2), 1.0)], 0.0);
+    eq.row(&[(ix(n, 2), 1.0)], p.h_end);
     eq.row(&[(ix(n, 3), 1.0)], 0.0);
     eq.row(&[(ix(n, 4), 1.0)], 0.0);
     eq.row(&[(ix(n, 5), 1.0)], -p.v_td);
@@ -188,9 +204,9 @@ fn solve_fixed(p: &Problem, tf: f64, d: &[V3], pinpoint: bool) -> Option<Plan> {
         ineq.row(&[(ix(k, 6), -1.0)], -z0);
         // pointing: u_up >= sigma cos(theta)
         ineq.row(&[(ix(k, 9), -1.0), (ix(k, 10), cos_p)], 0.0);
-        // above ground
+        // above the end height
         if k > 0 {
-            ineq.row(&[(ix(k, 2), -1.0)], 0.0);
+            ineq.row(&[(ix(k, 2), -1.0)], -p.h_end.min(p.r0.z));
         }
         // |u| <= sigma
         let mut s = Build::new();
@@ -202,7 +218,7 @@ fn solve_fixed(p: &Problem, tf: f64, d: &[V3], pinpoint: bool) -> Option<Plan> {
         // glide slope (skip the first nodes: the start may sit outside the cone)
         if k >= n / 3 {
             let mut s = Build::new();
-            s.row(&[(ix(k, 2), -1.0 / tan_g)], 0.0);
+            s.row(&[(ix(k, 2), -1.0 / tan_g)], -p.h_end / tan_g);
             s.row(&[(ix(k, 0), -1.0)], 0.0);
             s.row(&[(ix(k, 1), -1.0)], 0.0);
             socs.push((s, 3));
@@ -303,7 +319,7 @@ fn fuel_cost(p: &Problem, tf: f64, prev: Option<&Plan>, h_ref: f64) -> (f64, Opt
 pub fn plan(p: &Problem, warm_tf: Option<f64>) -> Option<Plan> {
     let h_ref = 0.0;
     let vz = p.v0.z.min(-0.5);
-    let tgo = 2.0 * p.r0.z.max(1.0) / (-vz + p.v_td);
+    let tgo = 2.0 * (p.r0.z - p.h_end).max(1.0) / (-vz + p.v_td);
     let (mut lo, mut hi) = match warm_tf {
         Some(t) => (0.8 * t, 1.25 * t),
         None => (0.5 * tgo, 2.5 * tgo),
@@ -365,6 +381,8 @@ mod tests {
             alpha: 1.0 / (250.0 * 9.80665),
             g: v3(0.0, 0.0, -9.79),
             v_td: 1.5,
+            h_end: 0.0,
+            t_vert: 2.0,
             tables: &tables,
             toff: 0.0,
             omega_enu: v3(0.0, 0.0, 0.0),
