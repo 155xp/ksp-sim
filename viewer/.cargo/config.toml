@@ -1,0 +1,3 @@
+# the sim repo is private: fetch through the git CLI so its credential helper is used
+[net]
+git-fetch-with-cli = true

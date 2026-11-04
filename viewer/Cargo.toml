@@ -1,0 +1,22 @@
+# Separate workspace: the viewer links the guidance and the sim read-only, pinned to a commit of
+# the `guidance` branch, so nothing in the sim's or the guidance's manifests changes.
+[workspace]
+
+[package]
+name = "ksp-viewer"
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Private"
+
+[dependencies]
+ksp-guidance = { git = "https://github.com/155xp/ksp-sim", rev = "81b348f1a89e64ed960273b4aef669d529b20e2a" }
+ksp-core = { git = "https://github.com/155xp/ksp-sim", rev = "81b348f1a89e64ed960273b4aef669d529b20e2a" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net"] }
+tower-http = { version = "0.6", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+codegen-units = 16

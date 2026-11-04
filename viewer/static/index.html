@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ksp-sim</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
+</head>
+<body>
+<canvas id="scene"></canvas>
+
+<aside class="card setup" id="setup">
+  <div class="field">
+    <span class="label">Booster</span>
+    <div class="seg" data-name="size">
+      <button data-v="0" aria-pressed="true">Any</button>
+      <button data-v="1">1.25 m</button>
+      <button data-v="2">2.5 m</button>
+      <button data-v="3">3.75 m</button>
+    </div>
+  </div>
+  <div class="field">
+    <span class="label">Start</span>
+    <div class="seg" data-name="start">
+      <button data-v="random" aria-pressed="true">Random</button>
+      <button data-v="set">Set</button>
+    </div>
+  </div>
+  <div class="set-fields" id="setFields" hidden>
+    <label class="num"><span>Altitude</span><input id="sAlt" type="number" value="16" step="0.5" min="1" max="90"><i>km</i></label>
+    <label class="num"><span>Downrange</span><input id="sDown" type="number" value="6.3" step="0.5" min="0" max="300"><i>km</i></label>
+    <label class="num"><span>Horizontal</span><input id="sVh" type="number" value="430" step="10"><i>m/s</i></label>
+    <label class="num"><span>Vertical</span><input id="sVz" type="number" value="690" step="10"><i>m/s</i></label>
+    <label class="num"><span>Fuel</span><input id="sFuel" type="number" value="30" step="1" min="1" max="100"><i>%</i></label>
+  </div>
+  <div class="field">
+    <span class="label">Landing</span>
+    <div class="seg" data-name="landing">
+      <button data-v="baseline" aria-pressed="true">Baseline</button>
+      <button data-v="gfold">G-FOLD</button>
+    </div>
+  </div>
+  <div class="row">
+    <label class="num seed"><span>Seed</span><input id="seed" type="number" value="7" min="0" step="1"></label>
+    <button class="icon" id="shuffle" title="New seed" aria-label="New seed">
+      <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M2 4.5h2.2c1.2 0 2 .5 2.7 1.5l2.2 4c.6 1 1.4 1.5 2.6 1.5H14M2 11.5h2.2c1.2 0 2-.5 2.7-1.5M9.1 6c.6-1 1.4-1.5 2.6-1.5H14M12.2 2.7 14 4.5l-1.8 1.8M12.2 9.7l1.8 1.8-1.8 1.8" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+  </div>
+  <button class="primary" id="run">Run</button>
+  <p class="meta" id="design" hidden></p>
+</aside>
+
+<aside class="right">
+  <section class="card telemetry" id="telemetry">
+    <div class="result" id="result" hidden>
+      <span class="badge" id="outcome"></span>
+      <div class="figs">
+        <div><b id="rMiss">–</b><span>Touchdown miss</span></div>
+        <div><b id="rSpeed">–</b><span>Touchdown speed</span></div>
+      </div>
+    </div>
+    <dl>
+      <dt>Phase</dt><dd><span class="badge" id="tPhase">–</span></dd>
+      <dt>Altitude</dt><dd id="tAlt">–</dd>
+      <dt>Vertical</dt><dd id="tVz">–</dd>
+      <dt>Horizontal</dt><dd id="tVh">–</dd>
+      <dt>Throttle</dt><dd id="tThr">–</dd>
+      <dt>Fuel</dt><dd id="tFuel">–</dd>
+      <dt>Mass</dt><dd id="tMass">–</dd>
+      <dt>To pad</dt><dd id="tPad">–</dd>
+    </dl>
+  </section>
+  <section class="card inset">
+    <canvas id="inset" width="248" height="248"></canvas>
+    <div class="inset-foot"><span id="missLabel">Predicted miss</span><b id="missVal">–</b></div>
+  </section>
+</aside>
+
+<footer class="card transport">
+  <button class="icon play" id="play" disabled aria-label="Pause">
+    <svg class="i-pause" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="4" y="3" width="2.6" height="10" rx=".8" fill="currentColor"/><rect x="9.4" y="3" width="2.6" height="10" rx=".8" fill="currentColor"/></svg>
+    <svg class="i-play" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M5 3.2v9.6c0 .5.5.8.9.5l7.2-4.8c.4-.3.4-.8 0-1L5.9 2.7c-.4-.3-.9 0-.9.5Z" fill="currentColor"/></svg>
+  </button>
+  <button class="secondary" id="reset" disabled>Reset</button>
+  <span class="clock" id="clock">T+ 0:00.0</span>
+  <input type="range" id="scrub" min="0" max="1" step="0.02" value="0" disabled aria-label="Timeline">
+  <div class="speed">
+    <input type="range" id="speed" min="0" max="11" step="1" value="5" aria-label="Speed">
+    <span class="speed-val" id="speedVal">10×</span>
+  </div>
+  <div class="seg compact" data-name="camera">
+    <button data-v="follow" aria-pressed="true">Follow</button>
+    <button data-v="orbit">Orbit</button>
+  </div>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
