@@ -195,8 +195,11 @@ pub const MAX_LANDING_G: f64 = 3.0;
 /// Terminal-phase observation for an external policy (see `Flight::terminal_obs`).
 pub const TERM_OBS_DIM: usize = 20;
 
+#[derive(Clone)]
 pub struct Flight {
     pub sh: Arc<Shared>,
+    /// stopped at landing-burn ignition (`stop_at_ignition`): resumable from this state
+    pub paused: bool,
     pub truth_stack: VesselSpec,
     pub truth_booster: VesselSpec,
     pub disp: Dispersion,
@@ -255,6 +258,7 @@ impl Flight {
         let pad = Pad::ksc();
         Flight {
             sh,
+            paused: false,
             truth_stack,
             truth_booster,
             disp,
@@ -318,7 +322,7 @@ impl Flight {
     }
 
     pub fn done(&self) -> bool {
-        self.phase == Phase::Done
+        self.phase == Phase::Done || self.paused
     }
 
     /// Predicted powered touchdown (landing-burn model) from the current state + impulse dv.
@@ -1044,7 +1048,7 @@ impl Flight {
                     self.prop_at_ign = propellant(self.spec(), &self.st.res).0;
                     self.set_phase(Phase::LandingBurn);
                     if self.cfg.stop_at_ignition {
-                        self.phase = Phase::Done;
+                        self.paused = true;
                         return;
                     }
                 }
