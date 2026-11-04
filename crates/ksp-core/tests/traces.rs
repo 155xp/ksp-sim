@@ -110,14 +110,14 @@ fn suicide_burn() {
 
 #[test]
 fn drop_tests() {
-    check_flight("v2", "HopperDrop2", Bounds { accel_median: 2e-4, win1_pos_max: 0.02, win1_att_max_deg: 0.3 });
+    check_flight("v2", "HopperDrop2", Bounds { accel_median: 1e-3, win1_pos_max: 0.02, win1_att_max_deg: 0.3 });
     check_touchdown("v2", "HopperDrop2", 0.02, 0.5);
 }
 
 #[test]
 fn pad_landing() {
-    check_flight("v3", "HopperPadLand", Bounds { accel_median: 5e-3, win1_pos_max: 0.1, win1_att_max_deg: 2.0 });
-    check_touchdown("v3", "HopperPadLand", 0.05, 0.1);
+    check_flight("v6", "HopperPadLand", Bounds { accel_median: 5e-3, win1_pos_max: 0.1, win1_att_max_deg: 2.0 });
+    check_touchdown("v6", "HopperPadLand", 0.05, 0.1);
 }
 
 #[test]

@@ -139,6 +139,8 @@ pub struct EngineSpec {
     /// root-frame thrust point and nominal thrust direction
     pub pos: V3,
     pub dir: V3,
+    /// root-frame gimbal pivot: the thrust point swings about it with the deflection
+    pub pivot: V3,
 }
 
 pub use crate::wheel::LegSpec;
@@ -182,6 +184,8 @@ pub struct VesselSpec {
     pub rw_response: f64,
     /// lowest point (legs fully extended) below the root origin, along root -Y
     pub bottom_y: f64,
+    /// radius about the root origin enclosing every contact point (hull, leg rays)
+    pub bound_radius: f64,
 }
 
 impl VesselSpec {
@@ -214,6 +218,7 @@ impl VesselSpec {
             rw_ec_rate: 0.0,
             rw_response: 30.0,
             bottom_y: 0.0,
+            bound_radius: 0.0,
         };
         for (i, p) in c.parts.iter().enumerate() {
             let d = &p.def;
@@ -274,6 +279,7 @@ impl VesselSpec {
                     gimbal_response_speed: e.gimbal_response_speed.unwrap_or(0.0),
                     pos: p.pos + p.rot.rotate(e.thrust_pos),
                     dir: p.rot.rotate(e.thrust_dir).normalized(),
+                    pivot: p.pos + p.rot.rotate(e.gimbal_pivot),
                     ..Default::default()
                 };
                 for (j, key) in e.atmosphere_curve.keys.iter().enumerate() {
@@ -332,7 +338,20 @@ impl VesselSpec {
         for k in 0..s.n_hull as usize {
             s.bottom_y = s.bottom_y.min(s.hull[k].y);
         }
+        s.update_bounds();
         s
+    }
+
+    /// Recompute `bound_radius` (call after editing hull / leg geometry).
+    pub fn update_bounds(&mut self) {
+        let mut r: f64 = 0.0;
+        for k in 0..self.n_hull as usize {
+            r = r.max(self.hull[k].norm());
+        }
+        for k in 0..self.n_legs as usize {
+            r = r.max(self.legs[k].anchor.norm()).max(self.legs[k].foot().norm());
+        }
+        self.bound_radius = r;
     }
 
     fn add_hull(&mut self, p: V3, tol: f64, break_force: f64) {

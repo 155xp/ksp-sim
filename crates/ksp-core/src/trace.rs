@@ -269,6 +269,9 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
             let p = mpos(&nums(&f["pos"]));
             let fw = mpos(&nums(&f["fwd"]));
             if e_idx < s.n_engines as usize {
+                if let Some(gt) = g.get("gimbalTransform") {
+                    s.engines[e_idx].pivot = mpos(&nums(&fields(gt)["pos"]));
+                }
                 s.engines[e_idx].pos = p;
                 s.engines[e_idx].dir = -fw.normalized();
                 if let Some(mf) = f.get("maxFuelFlow") {
@@ -278,6 +281,7 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
             }
         }
     }
+    s.update_bounds();
     s
 }
 

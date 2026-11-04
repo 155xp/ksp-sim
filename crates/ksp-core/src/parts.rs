@@ -42,6 +42,8 @@ pub struct EngineDef {
     /// thrust transform position / direction of force, part-local
     pub thrust_pos: V3,
     pub thrust_dir: V3,
+    /// gimbal transform position (pivot the thrust transform swings about), part-local
+    pub gimbal_pivot: V3,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -195,9 +197,11 @@ pub fn swivel() -> PartDef {
             response: None,
             gimbal_range_deg: 3.0,
             gimbal_response_speed: None,
-            // thrustTransform lives in the model (.mu); approximated at the bottom node, thrust +Y
-            thrust_pos: v3(0.0, -1.63, 0.0),
+            // measured in game (SimHarness geometry dump): thrustTransform 1.15798 m and gimbal
+            // transform 0.91589 m below the part origin, on the axis
+            thrust_pos: v3(0.0, -1.157983, 0.0),
             thrust_dir: v3(0.0, 1.0, 0.0),
+            gimbal_pivot: v3(0.0, -0.915888, 0.0),
         }),
         reaction_wheel: None,
         leg: None,
@@ -230,8 +234,10 @@ pub fn terrier() -> PartDef {
             response: None,
             gimbal_range_deg: 4.0,
             gimbal_response_speed: Some(30.0),
+            // Terrier: thrust / gimbal transforms not measured in game (approximate)
             thrust_pos: v3(0.0, -0.83, 0.0),
             thrust_dir: v3(0.0, 1.0, 0.0),
+            gimbal_pivot: v3(0.0, -0.6, 0.0),
         }),
         reaction_wheel: None,
         leg: None,
