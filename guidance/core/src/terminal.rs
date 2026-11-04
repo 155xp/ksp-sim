@@ -41,6 +41,9 @@ pub struct TerminalBatch {
     prop0: Vec<f64>,
     pub max_steps: u32,
     steps: Vec<u32>,
+    /// evaluation mode: every pool state is flown exactly once, finished slots stay finished
+    pub eval: bool,
+    pub finished: Vec<bool>,
 }
 
 /// Per-step outputs (length N or N * dim).
@@ -74,7 +77,7 @@ impl TerminalBatch {
             f.cfg.landing = LandingMode::External { residual };
             f.cfg.record = false;
         }
-        let mut b = TerminalBatch { slots: Vec::with_capacity(n), pool, rng: Rng(seed), ticks_per_step, residual, reward: RewardCfg::default(), potential: vec![0.0; n], prop0: vec![0.0; n], max_steps: 3000, steps: vec![0; n] };
+        let mut b = TerminalBatch { slots: Vec::with_capacity(n), pool, rng: Rng(seed), ticks_per_step, residual, reward: RewardCfg::default(), potential: vec![0.0; n], prop0: vec![0.0; n], max_steps: 3000, steps: vec![0; n], eval: false, finished: vec![false; n] };
         for i in 0..n {
             let f = b.sample();
             b.potential[i] = shaping(&f);
@@ -82,6 +85,25 @@ impl TerminalBatch {
             b.slots.push(f);
         }
         b
+    }
+
+    /// Evaluation batch: one slot per pool state, flown once each.
+    pub fn new_eval(pool: Vec<Flight>, residual: bool, ticks_per_step: u32) -> TerminalBatch {
+        let n = pool.iter().filter(|f| f.paused && f.phase == Phase::LandingBurn).count();
+        let mut b = TerminalBatch::new(pool, n, 0, residual, ticks_per_step);
+        b.eval = true;
+        for i in 0..n {
+            let mut f = b.pool[i].clone();
+            f.paused = false;
+            b.potential[i] = shaping(&f);
+            b.prop0[i] = prop(&f);
+            b.slots[i] = f;
+        }
+        b
+    }
+
+    pub fn all_finished(&self) -> bool {
+        self.finished.iter().all(|&x| x)
     }
 
     fn sample(&mut self) -> Flight {
@@ -123,6 +145,7 @@ impl TerminalBatch {
         let tps = self.ticks_per_step;
         let rw = self.reward;
         let max_steps = self.max_steps;
+        let finished = &self.finished;
         let res: Vec<(f64, bool, u8, f32, f32, f32, f32)> = self
             .slots
             .par_iter_mut()
@@ -131,6 +154,9 @@ impl TerminalBatch {
             .zip(self.steps.par_iter_mut())
             .enumerate()
             .map(|(i, (((f, pot), p0), st))| {
+                if finished[i] {
+                    return (0.0, false, 0, 0.0, 0.0, 0.0, 0.0);
+                }
                 for k in 0..ACT_DIM {
                     f.ext_action[k] = (actions[i * ACT_DIM + k] as f64).clamp(-1.0, 1.0);
                 }
@@ -172,7 +198,9 @@ impl TerminalBatch {
             out.td_vz[i] = vz;
             out.td_vh[i] = vh;
             out.fuel[i] = fu;
-            if d {
+            if d && self.eval {
+                self.finished[i] = true;
+            } else if d {
                 let f = self.sample();
                 self.potential[i] = shaping(&f);
                 self.prop0[i] = prop(&f);

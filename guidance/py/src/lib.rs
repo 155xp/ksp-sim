@@ -180,15 +180,28 @@ struct TerminalEnv {
 
 #[pymethods]
 impl TerminalEnv {
+    /// eval=True: one slot per ignition state in the fleet, each flown exactly once (no
+    /// auto-reset; `finished` tells which are done); num_envs is then ignored.
     #[new]
-    #[pyo3(signature = (fleet, num_envs = 256, seed = 0, residual = true, ticks_per_step = 5))]
-    fn new(py: Python<'_>, fleet: &Fleet, num_envs: usize, seed: u64, residual: bool, ticks_per_step: u32) -> PyResult<Self> {
+    #[pyo3(signature = (fleet, num_envs = 256, seed = 0, residual = true, ticks_per_step = 5, eval = false))]
+    fn new(py: Python<'_>, fleet: &Fleet, num_envs: usize, seed: u64, residual: bool, ticks_per_step: u32, eval: bool) -> PyResult<Self> {
         let pool: Vec<Flight> = fleet.flights.iter().filter(|f| f.paused && f.phase == Phase::LandingBurn).cloned().collect();
         if pool.is_empty() {
             return Err(pyo3::exceptions::PyValueError::new_err("fleet has no flights paused at ignition (run with stop_at_ignition=True)"));
         }
-        let batch = py.allow_threads(|| TerminalBatch::new(pool, num_envs, seed, residual, ticks_per_step));
-        Ok(TerminalEnv { obs: PyArray2::zeros(py, [num_envs, TERM_OBS_DIM], false).unbind(), batch })
+        let batch = py.allow_threads(|| if eval { TerminalBatch::new_eval(pool, residual, ticks_per_step) } else { TerminalBatch::new(pool, num_envs, seed, residual, ticks_per_step) });
+        let n = batch.len();
+        Ok(TerminalEnv { obs: PyArray2::zeros(py, [n, TERM_OBS_DIM], false).unbind(), batch })
+    }
+
+    #[getter]
+    fn finished<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray1<bool>> {
+        PyArray1::from_vec(py, self.batch.finished.clone())
+    }
+
+    #[getter]
+    fn all_finished(&self) -> bool {
+        self.batch.all_finished()
     }
 
     #[getter]
@@ -199,6 +212,16 @@ impl TerminalEnv {
     #[getter]
     fn pool_size(&self) -> usize {
         self.batch.pool.len()
+    }
+
+    /// Current observations (also valid in eval mode before the first step).
+    fn observe<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
+        let o = self.obs.bind(py);
+        let mut a = unsafe { o.as_array_mut() };
+        let s = a.as_slice_mut().unwrap();
+        let b = &self.batch;
+        py.allow_threads(|| b.observe(s));
+        o.clone()
     }
 
     fn reset<'py>(&mut self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
