@@ -5,3 +5,5 @@
 //! wheel torque, drag cubes), so the same code flies any booster `craft` can build.
 pub mod craft;
 pub mod partlib;
+pub mod nav;
+pub mod predict;
