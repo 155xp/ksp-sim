@@ -190,25 +190,17 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
         let def = parts::by_name(&sim_name).unwrap_or_else(|| panic!("no sim part def for {}", g.name));
         let pos = mpos(&g.vec("localPos").unwrap());
         let rot = mquat(&g.vec("localRot").unwrap());
-        craft.parts.push(Placed { def, pos, rot, stack: vec![] });
+        craft.parts.push(Placed { def, pos, rot, stack: vec![], parent: (g.parent >= 0).then_some(g.parent as usize) });
     }
     let mut s = VesselSpec::compile(&craft);
     let mut e_idx = 0;
-    // joint breakForce per part from the dump
-    let mut hk = 0usize;
-    for g in geom.iter() {
+    // joint breakForce per part from the dump (INF for the root); hull points take their part's
+    for (i, g) in geom.iter().enumerate() {
         let bf = g.get("joint").and_then(|j| fields(j).get("breakForce").map(|b| nums(b)[0])).unwrap_or(f64::INFINITY);
-        let is_leg = g.name.starts_with("landingLeg");
-        if !is_leg {
-            let def = parts::by_name(&g.name.replace('.', "_")).unwrap();
-            let nh = 4 * def.node_bottom.is_some() as usize + def.node_top.is_some() as usize;
-            for _ in 0..nh {
-                if hk < s.n_hull as usize {
-                    s.hull_break_force[hk] = bf;
-                    hk += 1;
-                }
-            }
-        }
+        s.part_break_force[i] = if g.parent >= 0 { bf } else { f64::INFINITY };
+    }
+    for k in 0..s.n_hull as usize {
+        s.hull_break_force[k] = s.part_break_force[s.hull_part[k] as usize];
     }
     for (i, g) in geom.iter().enumerate() {
         // rigidbody CoM, inertia (Unity: diag inertiaTensor in the frame inertiaTensorRotation

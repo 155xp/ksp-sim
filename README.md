@@ -35,7 +35,7 @@ BENCHMARKS.md       speed history (every change gated by the trace regression te
 ```bash
 uv venv .venv && uv pip install -p .venv maturin numpy pytest cupy-cuda12x   # cupy optional
 .venv/bin/maturin develop --release
-cargo test --release -p ksp-core # 37 unit tests + 8 in-game trace regressions (skipped without data/)
+cargo test --release -p ksp-core # 37 unit tests + 9 in-game trace regressions (skipped without data/)
 .venv/bin/python -m pytest tests # 28 Python tests (GPU ones skipped without cupy)
 ```
 
@@ -108,7 +108,8 @@ b = PointMassBatch(1 << 20, backend="cuda", dtype=np.float32, substeps=10)
   - The in-game raycast survey around the pad (0.2 m / 4 m grids), with per-collider friction.
   - Scenery placement (floating-origin re-rounding and the per-session KSC offset) as state, with
     optional reset jitter.
-  - Hull-point impulse contacts with joint break forces and crash tolerances.
+  - Hull-point impulse contacts. Crashes follow the game's collision rule (primary colliders
+    only, collision-enter speed against crashTolerance), checked by an in-game drop series.
 * **Craft geometry** taken from the game's geometry dump: parts, colliders, inertia, wheel
   colliders, thrust and gimbal transforms.
 * **Batching and APIs:**
@@ -121,7 +122,8 @@ b = PointMassBatch(1 << 20, backend="cuda", dtype=np.float32, substeps=10)
 
 * **Per-part joints:** the vessel is one rigid body. Joint flex is bounded (thrust-axis sag
   ≤ 2e-4 rad), and post-impact sliding on hard impacts is 0.2–0.45 m over 5 s.
-* **Crash rule:** an in-game crash series to validate it.
+* **Crash rule:** validated on vertical pad drops (10 of 11 outcomes, 9.7–39.7 m/s). Tilted and
+  sideways impacts are not yet series-tested.
 * **Off-pad terrain:** ~1 cm residual on the 4 m grid. Tip-over on slopes diverges within ~2 s.
 * **Not modelled:** thermal, lifting/control surfaces, RCS, parachutes, staging, multi-tank flow
   priority, `.craft` loading.

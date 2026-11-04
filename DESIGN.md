@@ -109,8 +109,13 @@ Traces seed them from the logged values. Training resets can randomize them (`gr
      (Smooth curve (0.01, 0.1), (2, 1), (7, 1), with Fext = −0.5·(F/g)·V/dt lerped at 10·dt).
    - **Hull points:** the collider extremes from the geometry dump. They feed a sequential-impulse
      solve (8 iterations, inelastic, speculative within contactOffset 0.01 m, depenetration at
-     0.55 of the gap per tick). The vessel crashes when a contact impulse exceeds the part joint's
-     breakForce, or the post-solve normal speed exceeds `crashTolerance`.
+     0.55 of the gap per tick).
+   - **Crash, as `Part.OnCollisionEnter` → `HandleCollision`:** a contact that starts this tick
+     (per-env hull bitmask) on a part's primary collider destroys the vessel if that part's
+     rigidbody speed exceeds its `crashTolerance`. The primary collider is `Part.collider`, from
+     `PartLoader.GetPartCollider`: the first non-trigger, non-airlock/ladder, non-wheel collider.
+     Other colliders, like the Swivel bell, push but never crash. Joint breakForce is not applied
+     by default; the in-game crash series broke no joint up to 39.7 m/s (VALIDATION_INGAME.md).
    - **Early-out:** above the highest ground point (plus the scenery offset) none of this runs.
 8. **Integrate** like PhysX: v += a·dt, x += v·dt. For rotation, the composite inertia about
    the CoM integrates ω += I⁻¹(τ − ω×(I_orb·ω))·dt, where I_orb is the parallel-axis part only:
@@ -128,7 +133,8 @@ VALIDATION_INGAME.md ("What is still not 1:1"). In short:
 - the vessel is one rigid body (joint flex, i.e. thrust-axis sag ≤ 2e-4 rad, is noise);
 - the contact solver is sequential impulses on the composite (post-impact sliding 0.2–0.45 m
   over 5 s on hard impacts, ≤ 5 cm on soft pad landings);
-- the crash rule is not yet validated by a crash series;
+- the crash rule matches 10 of 11 in-game pad drops (9.7–39.7 m/s); tilted impacts are not yet
+  series-tested;
 - yaw response during fast gimbal ramps is off by ~7%;
 - terrain off the pad is good to ~1 cm;
 - the GPU kernels have no vacuum orbit-drift compensation.

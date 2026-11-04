@@ -97,6 +97,9 @@ pub struct EnvState {
     pub ground_shift: V3,
     /// per-session radial offset of the KSC colliders (m, see Scenery)
     pub ksc_dz: f64,
+    /// hull points in ground contact after the last tick (bit k = hull point k): a contact that
+    /// was not there before is a PhysX OnCollisionEnter (Part.HandleCollision crash check)
+    pub hull_touch: u32,
 }
 
 /// Pilot input, as `FlightCtrlState` (mainThrottle, pitch, yaw, roll) in [0,1] / [-1,1].
@@ -124,6 +127,11 @@ pub struct Params {
     pub terrain: bool,
     /// destroy the vessel on impacts above a part's crashTolerance
     pub crash: bool,
+    /// also end the episode when the estimated load through a part joint exceeds its breakForce.
+    /// Off by default: in the in-game crash series (11 vertical pad drops, 9.7..39.7 m/s) no joint
+    /// ever broke, although the estimate passes 4400 kN from ~22 m/s; the game's only failure
+    /// (25.8 m/s) was a crashTolerance explosion. See VALIDATION_INGAME.md.
+    pub joint_break: bool,
 }
 
 impl Default for Params {
@@ -138,6 +146,7 @@ impl Default for Params {
             ground: true,
             terrain: true,
             crash: true,
+            joint_break: false,
         }
     }
 }
@@ -351,8 +360,11 @@ struct Contact {
     n: V3,
     gap: f64,
     crash_tol: f64,
-    break_force: f64,
     mu: f64,
+    /// hull point index, owning part, and whether the point is on the part's primary collider
+    hull: u8,
+    part: u8,
+    crash: bool,
 }
 
 /// Part-collider friction coefficient on the ground at `p` (see terrain.rs).
@@ -605,6 +617,8 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     let mut contact_any = false;
     let mut contacts = [Contact::default(); MAX_CONTACTS];
     let mut nc = 0usize;
+    // per-leg ground force this tick (suspension + tire), for the joint-load estimate
+    let mut leg_force = [V3::ZERO; MAX_LEGS];
     // exact early-out: every contact point lies within bound_radius of the root origin, and the
     // surveyed relief within that radius is < 5 m, so nothing can touch when the root is higher
     let sc = Scenery { shift: st.ground_shift, ksc_dz: st.ksc_dz };
@@ -613,6 +627,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     let above_all = st.x.norm() - sc.shift.norm() - sc.ksc_dz.max(0.0) - ground_ceiling(prm) >= margin;
     let near_ground = prm.ground && rot_frame && !above_all && ground_height_sc(prm, &sc, st.x) < margin;
     if !near_ground {
+        st.hull_touch = 0;
         for ls in st.legs[..spec.n_legs as usize].iter_mut() {
             ls.grounded = false;
             ls.x = 0.0;
@@ -661,6 +676,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                     let ft = side * ls.tire[0] as f64 + fwd * ls.tire[1] as f64;
                     force += ft;
                     torque += (p - x_com).cross(ft);
+                    leg_force[k] += ft;
                 } else {
                     ls.tire = [0.0, 0.0];
                 }
@@ -672,6 +688,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 let fc = n * reported;
                 force += fc;
                 torque += (p - x_com).cross(fc);
+                leg_force[k] += fc;
                 let vn = (v_com + st.w.cross(p - x_com)).dot(n);
                 st.impact_speed = st.impact_speed.max((-vn) as f32);
                 ls.grounded = true;
@@ -694,7 +711,16 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
             let p = st.x + st.q.rotate(spec.hull[k]);
             let gap = ground_height_sc(prm, &sc, p);
             if gap < reach && nc < MAX_CONTACTS {
-                contacts[nc] = Contact { r: p - x_com, n: ground_normal_sc(prm, &sc, p), gap, crash_tol: spec.hull_tolerance[k], break_force: spec.hull_break_force[k], mu: ground_friction(prm, p - sc.shift) };
+                contacts[nc] = Contact {
+                    r: p - x_com,
+                    n: ground_normal_sc(prm, &sc, p),
+                    gap,
+                    crash_tol: spec.hull_tolerance[k],
+                    mu: ground_friction(prm, p - sc.shift),
+                    hull: k as u8,
+                    part: spec.hull_part[k],
+                    crash: spec.hull_crash[k],
+                };
                 nc += 1;
             }
         }
@@ -746,13 +772,25 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     // exceeds the breakForce of its joint (dumped: 4400 kN engine/tank, 4000 kN legs).
     let (v_com_n, x_com_n) = if nc > 0 {
         let mut v = v_com_n;
+        // Part.OnCollisionEnter -> CheckCollision -> HandleCollision: a new contact on a part's
+        // primary collider destroys the part if |relativeVelocity| (the part rigidbody's
+        // velocity against the static ground, before the solve) exceeds its crashTolerance
+        let mut touch = 0u32;
         for c in &contacts[..nc] {
             if c.gap <= 0.01 {
                 contact_any = true;
                 let vn = (v + w.cross(c.r)).dot(c.n);
                 st.impact_speed = st.impact_speed.max((-vn) as f32);
+                touch |= 1 << c.hull;
+                if prm.crash && c.crash && st.hull_touch & (1 << c.hull) == 0 {
+                    let rp = st.q.rotate(spec.part_com[c.part as usize] - com_l);
+                    if (v + w.cross(rp)).norm() > c.crash_tol {
+                        st.status = STATUS_CRASHED;
+                    }
+                }
             }
         }
+        st.hull_touch = touch;
         let mut lam_n = [0.0f64; MAX_CONTACTS];
         let mut lam_t = [V3::ZERO; MAX_CONTACTS];
         for _ in 0..8 {
@@ -785,10 +823,30 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 }
             }
         }
-        for (ci, c) in contacts[..nc].iter().enumerate() {
-            if prm.crash {
-                let vn_after = (v + w.cross(c.r)).dot(c.n);
-                if lam_n[ci] / dt > c.break_force || -vn_after > c.crash_tol {
+        // joint breakForce: the load through the joint of each non-root part P, from the rigid
+        // composite: J_joint = (m_S / m) J_total - J_S, S = P's subtree, J = this tick's
+        // contact impulses + leg ground forces * dt (thrust and aero are spread by mass, i.e.
+        // add no joint load; error <= (m_S/m) * thrust * dt). Breaks when |J_joint| / dt >
+        // breakForce (dumped: 4400 kN engine / tank).
+        if prm.crash && prm.joint_break {
+            let mut j_part = [V3::ZERO; crate::vessel::MAX_PARTS];
+            for (ci, c) in contacts[..nc].iter().enumerate() {
+                j_part[c.part as usize] += c.n * lam_n[ci] + lam_t[ci];
+            }
+            for k in 0..spec.n_legs as usize {
+                j_part[spec.leg_part[k] as usize] += leg_force[k] * dt;
+            }
+            let j_tot = j_part.iter().fold(V3::ZERO, |a, &b| a + b);
+            for p in 1..spec.n_parts as usize {
+                let sub = spec.part_subtree[p];
+                let (mut m_s, mut j_s) = (0.0, V3::ZERO);
+                for i in 0..spec.n_parts as usize {
+                    if sub & (1 << i) != 0 {
+                        m_s += m_parts[i];
+                        j_s += j_part[i];
+                    }
+                }
+                if (j_tot * (m_s / m) - j_s).norm() / dt > spec.part_break_force[p] {
                     st.status = STATUS_CRASHED;
                 }
             }
@@ -796,6 +854,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         let dv = v - v_com_n;
         (v, x_com_n + dv * dt)
     } else {
+        st.hull_touch = 0;
         (v_com_n, x_com_n)
     };
     let wn = w.norm();

@@ -95,6 +95,14 @@ pub struct PartDef {
     pub hull_radius: Option<f64>,
     /// breakForce of the joint to the parent as the game sets it (SimHarness dump, kN)
     pub joint_break_force: f64,
+    /// whether the hull points above (stack-node rings, top centre) lie on the part's primary
+    /// collider. Only contacts on `Part.collider` (PartLoader.GetPartCollider: the first
+    /// non-trigger, non-airlock/ladder, non-wheel collider) reach Part.HandleCollision and can
+    /// destroy the part; other colliders push but never crash it.
+    pub hull_crash: bool,
+    /// extra contact points on the primary collider when the ring points are not on it (part
+    /// frame, sim x-mirrored; support points measured from the SimHarness collider dump)
+    pub crash_sensors: Vec<V3>,
 }
 
 /// A PartDatabase cube line, converted to the sim's (x-mirrored) part frame.
@@ -123,6 +131,8 @@ pub fn mk1pod_v2() -> PartDef {
         leg: None,
         hull_radius: Some(0.625),
         joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
     }
 }
 
@@ -146,6 +156,8 @@ pub fn fuel_tank_t400() -> PartDef {
         leg: None,
         hull_radius: Some(0.604),
         joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
     }
 }
 
@@ -169,6 +181,8 @@ pub fn fuel_tank_t800() -> PartDef {
         leg: None,
         hull_radius: None,
         joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
     }
 }
 
@@ -207,6 +221,18 @@ pub fn swivel() -> PartDef {
         leg: None,
         hull_radius: Some(0.316),
         joint_break_force: 4400.0,
+        // Part.collider is Col5 (engine body, y 0 .. -0.916); the bell (Col3, down to -1.63)
+        // is a separate collider: it takes the ground contact but cannot destroy the engine
+        // (in game: bell strikes at up to 21.8 m/s with crashTolerance 7, engine intact)
+        hull_crash: false,
+        crash_sensors: vec![
+            v3(-0.067324, -0.915888, -0.116578),
+            v3(-0.412290, -0.000722, 0.000019),
+            v3(-0.413908, -0.512986, 0.000015),
+            v3(0.413914, -0.512991, 0.000015),
+            v3(0.000006, -0.840881, 0.277678),
+            v3(0.000008, -0.000731, -0.316334),
+        ],
     }
 }
 
@@ -243,6 +269,8 @@ pub fn terrier() -> PartDef {
         leg: None,
         hull_radius: None,
         joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
     }
 }
 
@@ -271,6 +299,8 @@ pub fn lt1_leg() -> PartDef {
         leg: Some(LegDef { anchor: v3(0.0, -0.6, 0.1), radius: 0.15, travel: 0.75 * 1.25, travel_cfg: 0.75, spring_ratio: 30.0, damper_ratio: 2.2, boost_ratio: 0.7, maximum_load: 40.0 }),
         hull_radius: None,
         joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
     }
 }
 
@@ -300,6 +330,8 @@ pub fn lt2_leg() -> PartDef {
         leg: Some(LegDef { anchor: v3(0.0, -0.835, 0.1039), radius: 0.15, travel: 1.1875, travel_cfg: 0.95, spring_ratio: 33.0, damper_ratio: 2.2, boost_ratio: 0.7, maximum_load: 40.0 }),
         hull_radius: None,
         joint_break_force: 4000.0,
+        hull_crash: true,
+        crash_sensors: vec![],
     }
 }
 

@@ -40,8 +40,9 @@ pub mod st {
     pub const LEGS: usize = 78;
     pub const GSHIFT: usize = LEGS + super::MAX_LEGS * super::LEG_FIELDS;
     pub const KSCDZ: usize = GSHIFT + 3;
+    pub const HTOUCH: usize = GSHIFT + 4;
 }
-pub const STATE_FIELDS: usize = st::GSHIFT + 4;
+pub const STATE_FIELDS: usize = st::GSHIFT + 5;
 
 pub fn pack_state(s: &EnvState, out: &mut [f64]) {
     out[st::UT] = s.ut;
@@ -89,6 +90,7 @@ pub fn pack_state(s: &EnvState, out: &mut [f64]) {
     }
     out[st::GSHIFT..st::GSHIFT + 3].copy_from_slice(&[s.ground_shift.x, s.ground_shift.y, s.ground_shift.z]);
     out[st::KSCDZ] = s.ksc_dz;
+    out[st::HTOUCH] = s.hull_touch as f64;
 }
 
 pub fn unpack_state(a: &[f64]) -> EnvState {
@@ -138,6 +140,7 @@ pub fn unpack_state(a: &[f64]) -> EnvState {
     }
     s.ground_shift = v3(a[st::GSHIFT], a[st::GSHIFT + 1], a[st::GSHIFT + 2]);
     s.ksc_dz = a[st::KSCDZ];
+    s.hull_touch = a[st::HTOUCH] as u32;
     s
 }
 
@@ -178,7 +181,7 @@ pub fn pack(spec: &VesselSpec, prm: &Params) -> Pack {
     for (n, v) in [("UT", st::UT), ("X", st::X), ("V", st::V), ("Q", st::Q), ("W", st::W), ("RES", st::RES), ("THR", st::THR), ("GIMBAL", st::GIMBAL),
         ("FLAMEOUT", st::FLAMEOUT), ("RW", st::RW), ("SMOOTH", st::SMOOTH), ("SMOOTH_IDX", st::SMOOTH_IDX), ("SPIKING", st::SPIKING),
         ("PROVISIONAL", st::PROVISIONAL), ("LAST_VEL", st::LAST_VEL), ("LAST_VEL_IDX", st::LAST_VEL_IDX), ("DRIFT", st::DRIFT),
-        ("STATUS", st::STATUS), ("SETTLED", st::SETTLED), ("TICKS", st::TICKS), ("IMPACT", st::IMPACT), ("TOFF", st::TOFF), ("FRAME", st::FRAME), ("LEGS", st::LEGS), ("GSHIFT", st::GSHIFT), ("KSCDZ", st::KSCDZ)] {
+        ("STATUS", st::STATUS), ("SETTLED", st::SETTLED), ("TICKS", st::TICKS), ("IMPACT", st::IMPACT), ("TOFF", st::TOFF), ("FRAME", st::FRAME), ("LEGS", st::LEGS), ("GSHIFT", st::GSHIFT), ("KSCDZ", st::KSCDZ), ("HTOUCH", st::HTOUCH)] {
         writeln!(p.header, "#define S_{n} {v}").unwrap();
     }
     // world
@@ -292,7 +295,10 @@ pub fn pack(spec: &VesselSpec, prm: &Params) -> Pack {
     p.scalar("N_HULL", s.n_hull as f64);
     p.array("HULL", &flat3(&s.hull));
     p.array("HULLTOL", &s.hull_tolerance);
-    p.array("HULLBF", &s.hull_break_force.map(|x| if x.is_finite() { x } else { 1e300 }));
+    p.array("HULLPART", &s.hull_part.map(|x| x as f64));
+    p.array("HULLCRASH", &s.hull_crash.map(|x| x as u8 as f64));
+    // joint-break estimate (Params::joint_break) is CPU-only; the kernels apply the collision rule
+    assert!(!prm.joint_break, "Params::joint_break is not implemented in the CUDA kernels");
     p.array("RWTORQUE", &[s.rw_torque.x, s.rw_torque.y, s.rw_torque.z]);
     p.scalar("RWEC", s.rw_ec_rate);
     p.scalar("RWRESP", s.rw_response);

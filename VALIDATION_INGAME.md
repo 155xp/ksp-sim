@@ -101,13 +101,55 @@ values; v2–v6 traces are seeded from the wheel-hit heights instead. Training r
 offsets with `ground_shift_max` / `ksc_dz_max`, which default to 0 (surveyed placement). For a
 lander meant to fly in the real game, ±0.022 m / ±0.04 m covers everything measured.
 
+## Crash series (v8): vertical drops onto the pad
+
+`harness/kos/harness/crashdrop.ks` hovers the hopper still at h = v²/2g above the pad, cuts the
+engine and lets it fall. 11 drops, logged impact 9.7–39.7 m/s:
+
+| impact (m/s) | 9.7 | 11.7 | 12.8 | 13.8 | 15.7 | 18.9 | 21.8 | 25.8 | 29.7 | 34.7 | 39.7 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| game | intact | intact | intact | intact | intact | intact | intact | **tank exploded** 2.2 s after touchdown | intact | intact (ended on its side) | intact |
+| sim (seeded 2 s before touchdown) | intact | intact | intact | intact | intact | intact | intact | intact | intact | intact | intact |
+| peak leg compression game / sim (m) | 0.701 / 0.700 | 0.757 / 0.761 | 0.774 / 0.775 | 0.787 / 0.787 | 0.801 / 0.802 | 0.781 / 0.781 | 0.700 / 0.705 | 1.090 / 1.038 | 0.845 / 0.845 | 1.202 / 1.189 | 0.725 / 0.731 |
+
+Touchdown is on the same tick in every drop.
+
+**What the game does** (decompiled `Part.OnCollisionEnter` → `CheckCollision` →
+`HandleCollision`): only a collision that involves a part's primary collider can destroy the
+part. That collider is `Part.collider`, picked by `PartLoader.GetPartCollider`: the first collider
+that isn't a trigger, airlock, ladder or wheel. The part is destroyed when the collision starts
+with `|relativeVelocity|` above its `crashTolerance`, and wheel-piston contacts are exempt. On the
+hopper:
+- the Swivel's primary collider is the engine body (Col5). Its bell (Col3, 0.7 m lower) takes
+  every pad impact and pushes, but can never crash the engine. That's why bell strikes at up to
+  39.7 m/s left it intact, despite crashTolerance 7;
+- the legs' primary collider is the piston, which never touches scenery;
+- pod and tank are single colliders.
+
+No joint ever broke in the series. That holds although a rigid estimate of the engine joint's
+load passes its breakForce (4400 kN) from ~22 m/s; PhysX distributes the impulse differently.
+The one loss, at 25.8 m/s, was a crashTolerance explosion of the tank 2.2 s after touchdown,
+after a tilted rebound with the legs past full travel. In that regime both games and sims
+diverge within seconds (6 m after 5 s, see below).
+
+**The sim now does the same:**
+- hull points carry their part and a primary-collider flag (the Swivel gets its measured Col5
+  support points; the bell ring stays physical-only);
+- a per-env bitmask turns contacts into collision-enter events;
+- the crash test is the part rigidbody's speed against crashTolerance;
+- the joint-load estimate is off by default (`Params::joint_break`).
+
+Before this change the sim's blind prediction lost the vessel at 18.7 m/s and above (joint
+rule). Now it agrees with the game in 10 of 11 drops. `tests/traces.rs::crash_series_survivals`
+pins the 9 intact drops.
+
 ## What is still not 1:1, and the bound
 
 | difference | game | sim | bound / measured effect |
 |---|---|---|---|
 | vessel = one rigid body | each part is a PhysX rigidbody on joints | composite rigid body with KSP's gyroscopic split (parallel-axis part only) and per-part angular damping | in flight, joint flex shows up as thrust-axis sag of 1e-6..2e-4 rad after spawn (random per flight, constant after; measured in 7 flights): ≤ 0.006°, ≤ 0.003 m/s² lateral. Not modelled; treat as noise. A trace whose end dump shows a deformed joint (tip-over) uses the start pose |
 | contact solver | PhysX PGS on 6 part bodies + joints, speculative contacts, contactOffset 0.01 | sequential impulses on the composite (8 iterations), same contactOffset, depenetration fraction 0.55 (fitted to the drop traces) | soft pad landings (≤ 3 m/s): ≤ 5 mm at touchdown, ≤ 5 cm after 5 s. Hard impacts: 9.2 m/s drop 0.2 m after 5 s; 16 m/s nozzle strike 0.45 m (post-impact sliding / rotation; the part-level joint response isn't there) |
-| crash rule | joint breakForce (engine / tank 4400, legs 4000) and part crashTolerance per PhysX contact | same thresholds on the composite's contact impulse / post-solve speed | not yet validated with an in-game crash series. Every validation landing was below the thresholds in both |
+| crash rule | `HandleCollision` on each part's primary collider (collision-enter speed > crashTolerance); joints break on PhysX joint force | the same collision rule (primary-collider points, enter events, part speed); joint break estimate off by default | crash series: same outcome in 10 of 11 drops (9.7–39.7 m/s). Missed: one tank explosion at 25.8 m/s, after a tilted rebound past full leg travel (the sim diverges there too). Tilted / sideways impacts not yet series-tested |
 | yaw/pitch response during fast gimbal ramps | gimbal transform hierarchy, joint compliance | rigid gimbal about the measured pivot (torque coefficient 0.867 measured) | ~7% of the commanded response during ramps; 1-s windows ≤ 0.84° in the gimbal-heavy pad landing, ≤ 0.12° in the suicide burns |
 | terrain away from the pad | PQS quads (LOD mesh) + KSC colliders | in-game raycast survey: 0.2 m grid within ±40 m of the pad, 4 m grid within ±1.5 km, bilinear | pad: exact (hits on the modelled ground to 0.0000 m). Grass 310 m out: −8.4..−9.0 mm residual (4 m interpolation of the mesh, or LOD-dependent quad vertices). A lateral landing on that slope tips over in both, but diverges by ~1 m within 2 s |
 | scenery placement | float-rounded per origin shift + per session | modelled (above); reset jitter opt-in | exact when seeded; otherwise ±2.2 cm (shift) + ±4 cm (session) of deck height |

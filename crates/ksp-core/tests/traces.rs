@@ -148,3 +148,43 @@ fn hop_terrain_landing_report() {
     let td = tds.last().expect("touchdown");
     assert!(td.pos_err_td < 0.02, "{}", td.pos_err_td);
 }
+
+/// In-game crash series (harness/kos/harness/crashdrop.ks): vertical drops onto the pad. The
+/// game kept the vessel intact in every drop up to 21.8 m/s (the Swivel bell takes the impact
+/// on a non-primary collider) and at 29.7 / 39.7 m/s; seeded 2 s before touchdown, the sim must
+/// not crash, touch down on the same tick, and match the peak leg compression.
+#[test]
+fn crash_series_survivals() {
+    use ksp_core::sim::{self, Params};
+    use ksp_core::trace::{control, state_at};
+    for (name, check_compression) in [
+        ("CrashDrop10", true), ("CrashDrop12", true), ("CrashDrop13", true), ("CrashDrop14", true), ("CrashDrop16", true),
+        ("CrashDrop19", true), ("CrashDrop22", true), ("CrashDrop30", false), ("CrashDrop40", false),
+    ] {
+        let Some(t) = load("v8", name) else { continue };
+        let spec = t.spec();
+        let c = &t.csv;
+        let tds = touchdowns(&t, &spec, &Params { crash: false, ..Params::default() }, 100, 250);
+        let td = &tds[0];
+        assert_eq!(td.sim_tick, td.game_tick, "{name}: touchdown tick");
+        let mut st = state_at(&t, &spec, td.game_tick - 100);
+        let (mut gmax, mut smax) = (0f64, 0f64);
+        for j in td.game_tick - 100..c.n - 1 {
+            sim::tick(&spec, &Params::default(), &mut st, &control(&t, j));
+            assert_ne!(st.status, sim::STATUS_CRASHED, "{name}: sim crashed at tick {}", j + 1);
+            if j < td.game_tick + 60 {
+                for k in 0..spec.n_legs as usize {
+                    let g = c.c(&format!("ws{k}_cd"))[j + 1];
+                    if g.is_finite() {
+                        gmax = gmax.max(g);
+                    }
+                    smax = smax.max(st.legs[k].x as f64);
+                }
+            }
+        }
+        eprintln!("v8/{name}: touchdown tick {}, peak compression game {gmax:.3} sim {smax:.3} m, no crash", td.game_tick);
+        if check_compression {
+            assert!((gmax - smax).abs() < 0.01, "{name}: peak compression game {gmax} sim {smax}");
+        }
+    }
+}

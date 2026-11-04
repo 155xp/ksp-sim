@@ -539,7 +539,7 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
             dX = ff(X - GS - o);
         }
         int legs = 0; bool contact_any = false;
-        F3 cr[MAX_HULL], cn[MAX_HULL]; float cgap[MAX_HULL], ctol[MAX_HULL], cbf[MAX_HULL], cmu[MAX_HULL]; int nc = 0;
+        F3 cr[MAX_HULL], cn[MAX_HULL]; float cgap[MAX_HULL], ctol[MAX_HULL], cmu[MAX_HULL]; int chull[MAX_HULL]; int nc = 0;
         const double margin = P[P_BOUND] + 10.0 + normd(v_com) * dt;
         // exact early-out above the highest ground point (sim::ground_ceiling)
         const bool above_all = normd(X) - normd(GS) - fmax(KDZ, 0.0) - P[P_GROUND_CEIL] >= margin;
@@ -651,7 +651,7 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
                 D3 p = X + dd(rh);
                 double gap = T.ok ? (double)lt_height(T, tmf, Lt, dh, kdzf) : ground_height(P, T, p - GS, KDZ);
                 if (gap < 0.01 && nc < MAX_HULL) {
-                    cr[nc] = rh - r_com; cgap[nc] = (float)gap; ctol[nc] = Pf[P_HULLTOL + k]; cbf[nc] = Pf[P_HULLBF + k];
+                    cr[nc] = rh - r_com; cgap[nc] = (float)gap; ctol[nc] = Pf[P_HULLTOL + k]; chull[nc] = k;
                     if (T.ok) { cn[nc] = lt_normal(T, tmf, Lt, dh, kdzf); cmu[nc] = lt_friction(T, tmf, Lt, dh); }
                     else { cn[nc] = ff(ground_normal(P, T, p - GS, KDZ)); cmu[nc] = ground_friction(T, p - GS); }
                     nc++;
@@ -671,9 +671,21 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
         F3 dw = mat_vec(ilinv, mat_vec(damp, wl2));
         wl2 = wl2 - dw * dtf;
         F3 w = qrot(qq, wl2);
+        if (nc == 0) SV(S_HTOUCH) = 0.0;
         if (nc > 0) {
             F3 vb = ff(v_com_n), dV = f3(0, 0, 0);
-            for (int c = 0; c < nc; c++) if (cgap[c] <= 0.01f) { contact_any = true; float vn = dot(vb + cross(w, cr[c]), cn[c]); SV(S_IMPACT) = fmax(SV(S_IMPACT), (double)(-vn)); }
+            // Part.OnCollisionEnter -> HandleCollision (see cuda_tick.cu / sim.rs)
+            unsigned int touch = 0u, prev = (unsigned int)SV(S_HTOUCH);
+            for (int c = 0; c < nc; c++) if (cgap[c] <= 0.01f) {
+                contact_any = true; float vn = dot(vb + cross(w, cr[c]), cn[c]); SV(S_IMPACT) = fmax(SV(S_IMPACT), (double)(-vn));
+                int k = chull[c]; touch |= 1u << k;
+                if (P[P_CRASH] != 0.0 && Pf[P_HULLCRASH + k] != 0.f && !(prev & (1u << k))) {
+                    int pi = (int)Pf[P_HULLPART + k];
+                    F3 rp = qrot(qq, PF3(P_PCOM, pi) - com_l);
+                    if (norm(vb + cross(w, rp)) > ctol[c]) SV(S_STATUS) = 3.0;
+                }
+            }
+            SV(S_HTOUCH) = (double)touch;
             float ln[MAX_HULL]; F3 lt[MAX_HULL];
             for (int c = 0; c < nc; c++) { ln[c] = 0.f; lt[c] = f3(0, 0, 0); }
             const float minv = 1.f / m;
@@ -704,7 +716,6 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
                     }
                 }
             }
-            for (int c = 0; c < nc; c++) if (P[P_CRASH] != 0.0) { float van = dot(vb + dV + cross(w, cr[c]), cn[c]); if (ln[c] / dtf > cbf[c] || -van > ctol[c]) SV(S_STATUS) = 3.0; }
             x_com_n = x_com_n + dd(dV) * dt; v_com_n = v_com_n + dd(dV);
         }
         float wn = norm(w);

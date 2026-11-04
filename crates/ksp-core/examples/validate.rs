@@ -15,7 +15,7 @@ fn row(name: &str, sim: f64, refv: f64, unit: &str, src: &str) {
 }
 
 fn engine_spec(def: ksp_core::parts::PartDef) -> ksp_core::vessel::EngineSpec {
-    let c = Craft { parts: vec![Placed { def, pos: V3::ZERO, rot: ksp_core::math::Quat::IDENTITY, stack: vec![] }] };
+    let c = Craft { parts: vec![Placed { def, pos: V3::ZERO, rot: ksp_core::math::Quat::IDENTITY, stack: vec![], parent: None }] };
     VesselSpec::compile(&c).engines[0]
 }
 
@@ -91,7 +91,7 @@ fn main() {
     println!("## 4. Stock vessel dV / TWR (Tsiolkovsky with g0 = 9.80665, as KSP's DeltaV app)\n");
     println!("| craft | wet (t) | dry (t) | dV vac (m/s) | dV ASL (m/s) | TWR ASL |\n|---|---|---|---|---|---|");
     for (name, eng) in [("Mk1 pod + FL-T400 + LV-909", ksp_core::parts::terrier()), ("Mk1 pod + FL-T400 + LV-T45 (+3 LT-2) hopper", ksp_core::parts::swivel())] {
-        let mut c = Craft { parts: vec![Placed { def: ksp_core::parts::mk1pod_v2(), pos: V3::ZERO, rot: ksp_core::math::Quat::IDENTITY, stack: vec![] }] };
+        let mut c = Craft { parts: vec![Placed { def: ksp_core::parts::mk1pod_v2(), pos: V3::ZERO, rot: ksp_core::math::Quat::IDENTITY, stack: vec![], parent: None }] };
         let t = c.stack_below(0, ksp_core::parts::fuel_tank_t400());
         let _ = c.stack_below(t, eng);
         if name.contains("hopper") {

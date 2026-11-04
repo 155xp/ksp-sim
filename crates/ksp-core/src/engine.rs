@@ -87,7 +87,7 @@ mod tests {
     use crate::vessel::{Craft, VesselSpec};
 
     fn spec_of(def: crate::parts::PartDef) -> EngineSpec {
-        let c = Craft { parts: vec![crate::vessel::Placed { def, pos: crate::math::V3::ZERO, rot: crate::math::Quat::IDENTITY, stack: vec![] }] };
+        let c = Craft { parts: vec![crate::vessel::Placed { def, pos: crate::math::V3::ZERO, rot: crate::math::Quat::IDENTITY, stack: vec![], parent: None }] };
         VesselSpec::compile(&c).engines[0]
     }
 

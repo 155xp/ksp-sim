@@ -16,7 +16,7 @@ use crate::parts::{PartDef, N_RES, RES_DENSITY};
 pub const MAX_PARTS: usize = 16;
 pub const MAX_ENGINES: usize = 4;
 pub const MAX_LEGS: usize = 6;
-pub const MAX_HULL: usize = 16;
+pub const MAX_HULL: usize = 24;
 pub const MAX_ISP_KEYS: usize = 8;
 
 /// A part placed in the craft's root frame (root part origin, root orientation).
@@ -27,6 +27,8 @@ pub struct Placed {
     pub rot: Quat,
     /// stack attachments: (index of neighbour, this part's node direction, part-local)
     pub stack: Vec<(usize, V3)>,
+    /// parent part index (None = root)
+    pub parent: Option<usize>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -44,7 +46,7 @@ impl Craft {
         let i = self.parts.len();
         let prot = p.rot;
         self.parts[parent].stack.push((i, pbd));
-        self.parts.push(Placed { def, pos, rot: prot, stack: vec![(parent, ctd)] });
+        self.parts.push(Placed { def, pos, rot: prot, stack: vec![(parent, ctd)], parent: Some(parent) });
         i
     }
 
@@ -56,7 +58,7 @@ impl Craft {
         let pos = self.parts[parent].pos + v3(0.0, y, 0.0) + out * r;
         // rotation taking +Z to -out, keeping +Y: angle about Y
         let rot = Quat::from_to(v3(0.0, 0.0, 1.0), -out);
-        self.parts.push(Placed { def, pos, rot, stack: vec![] });
+        self.parts.push(Placed { def, pos, rot, stack: vec![], parent: Some(parent) });
         self.parts.len() - 1
     }
 
@@ -74,7 +76,7 @@ impl Craft {
         let pos_u = hit_u - rot_u.rotate(node_pos);
         let pos = v3(-pos_u.x, pos_u.y, pos_u.z);
         let rot = Quat::new(rot_u.x, -rot_u.y, -rot_u.z, rot_u.w);
-        self.parts.push(Placed { def, pos, rot, stack: vec![] });
+        self.parts.push(Placed { def, pos, rot, stack: vec![], parent: Some(parent) });
         self.parts.len() - 1
     }
 
@@ -83,7 +85,7 @@ impl Craft {
     /// the tank's lower edge (0.9 m below its centre).
     pub fn hopper() -> Craft {
         use crate::parts::*;
-        let mut c = Craft { parts: vec![Placed { def: mk1pod_v2(), pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![] }] };
+        let mut c = Craft { parts: vec![Placed { def: mk1pod_v2(), pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![], parent: None }] };
         let tank = c.stack_below(0, fuel_tank_t400());
         let _eng = c.stack_below(tank, swivel());
         // landingLeg1-2 node_attach (LT-2 cfg) * rescaleFactor 1.25
@@ -181,6 +183,19 @@ pub struct VesselSpec {
     pub hull_tolerance: [f64; MAX_HULL],
     /// breakForce (kN) of the joint between the hull point's part and its parent (INF for the root)
     pub hull_break_force: [f64; MAX_HULL],
+    /// part index owning each hull point (its rigidbody velocity is what Part.HandleCollision tests)
+    pub hull_part: [u8; MAX_HULL],
+    /// whether a contact at the hull point can destroy its part (on the part's primary collider)
+    pub hull_crash: [bool; MAX_HULL],
+    /// parent part index (-1 = root) and the mass of the subtree below each part's joint is
+    /// computed from these (joint load estimate for breakForce)
+    pub part_parent: [i8; MAX_PARTS],
+    /// bitmask of the parts in each part's subtree (itself and everything below its joint)
+    pub part_subtree: [u32; MAX_PARTS],
+    /// breakForce of each part's joint to its parent (kN; INF for the root)
+    pub part_break_force: [f64; MAX_PARTS],
+    /// part index of each leg
+    pub leg_part: [u8; MAX_LEGS],
     pub rw_torque: V3,
     pub rw_ec_rate: f64,
     pub rw_response: f64,
@@ -217,12 +232,30 @@ impl VesselSpec {
             hull: [V3::ZERO; MAX_HULL],
             hull_tolerance: [0.0; MAX_HULL],
             hull_break_force: [f64::INFINITY; MAX_HULL],
+            hull_part: [0; MAX_HULL],
+            hull_crash: [true; MAX_HULL],
+            part_parent: [-1; MAX_PARTS],
+            part_subtree: [0; MAX_PARTS],
+            part_break_force: [f64::INFINITY; MAX_PARTS],
+            leg_part: [0; MAX_LEGS],
             rw_torque: V3::ZERO,
             rw_ec_rate: 0.0,
             rw_response: 30.0,
             bottom_y: 0.0,
             bound_radius: 0.0,
         };
+        for (i, p) in c.parts.iter().enumerate() {
+            s.part_parent[i] = p.parent.map_or(-1, |x| x as i8);
+            s.part_break_force[i] = if p.parent.is_some() { p.def.joint_break_force } else { f64::INFINITY };
+        }
+        for i in 0..c.parts.len() {
+            // walk up from every part, marking it in each ancestor's subtree
+            let mut j = Some(i);
+            while let Some(a) = j {
+                s.part_subtree[a] |= 1 << i;
+                j = c.parts[a].parent;
+            }
+        }
         for (i, p) in c.parts.iter().enumerate() {
             let d = &p.def;
             s.part_dry_mass[i] = d.mass;
@@ -319,6 +352,7 @@ impl VesselSpec {
                     crash_tolerance: d.crash_tolerance,
                     min_down_force: 10.0,
                 };
+                s.leg_part[s.n_legs as usize] = i as u8;
                 s.n_legs += 1;
             } else {
                 // hull points: a ring at each stack node (bottom ring sized like the part, smaller
@@ -329,11 +363,14 @@ impl VesselSpec {
                 let bf = if i == 0 { f64::INFINITY } else { d.joint_break_force };
                 if let Some((nb, _)) = d.node_bottom {
                     for (dx, dz) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-                        s.add_hull(p.pos + p.rot.rotate(nb + v3(dx * r, 0.0, dz * r)), d.crash_tolerance, bf);
+                        s.add_hull(i, p.pos + p.rot.rotate(nb + v3(dx * r, 0.0, dz * r)), d.crash_tolerance, bf, d.hull_crash);
                     }
                 }
                 if let Some((nt, _)) = d.node_top {
-                    s.add_hull(p.pos + p.rot.rotate(nt), d.crash_tolerance, bf);
+                    s.add_hull(i, p.pos + p.rot.rotate(nt), d.crash_tolerance, bf, d.hull_crash);
+                }
+                for c in &d.crash_sensors {
+                    s.add_hull(i, p.pos + p.rot.rotate(*c), d.crash_tolerance, bf, true);
                 }
             }
         }
@@ -366,8 +403,10 @@ impl VesselSpec {
         self.bound_radius = r;
     }
 
-    fn add_hull(&mut self, p: V3, tol: f64, break_force: f64) {
+    fn add_hull(&mut self, part: usize, p: V3, tol: f64, break_force: f64, crash: bool) {
         if (self.n_hull as usize) < MAX_HULL {
+            self.hull_part[self.n_hull as usize] = part as u8;
+            self.hull_crash[self.n_hull as usize] = crash;
             self.hull[self.n_hull as usize] = p;
             self.hull_tolerance[self.n_hull as usize] = tol;
             self.hull_break_force[self.n_hull as usize] = break_force;
