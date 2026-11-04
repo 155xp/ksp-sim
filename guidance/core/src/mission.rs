@@ -179,7 +179,8 @@ pub struct Stats {
     pub max_q_descent: f64,
     pub gfold_solves: u32,
     pub gfold_fail: u32,
-    /// 1 if the return to the pad was declared infeasible at separation (propellant)
+    /// return to the pad declared infeasible: 1 = propellant (at separation), 2 = attitude
+    /// authority (the boostback could not hold its burn attitude against the aero moment)
     pub abort: u32,
     /// time spent swinging to engine-first on the gimbal in the air (s)
     pub swing_burn_s: f64,
@@ -206,7 +207,7 @@ pub const AIM_LONG: bool = false;
 pub const DIVERT: bool = true;
 /// Fraction of the nominal divert reach the landing burn reliably achieves (lift reversal and
 /// attitude lag eat the rest; calibrated on Monte Carlo replays).
-pub const REACH_FRACTION: f64 = 0.2;
+pub const REACH_FRACTION: f64 = 0.1;
 /// Drive the in-air swing to engine-first with the gimbal (tried; costs more than it saves: off).
 pub const GIMBAL_SWING: bool = false;
 /// A 180 degree flip should take about this long (sets the gimbal-assist throttle).
@@ -547,7 +548,9 @@ impl Flight {
         self.stats.sep_have = have;
         self.set_phase(Phase::Flip);
         self.bb_dv = V3::ZERO;
-        if need > have {
+        // only a finite budget can prove the return infeasible (inf = the solve failed: the
+        // boostback guidance retries on its own)
+        if need.is_finite() && need > have {
             // infeasible: land at the booster's own predicted impact point instead
             self.stats.abort = 1;
             let nb = nav(&self.sh.built.booster, &self.st);
@@ -664,7 +667,10 @@ impl Flight {
         if a_rw >= need || a_g <= 0.0 {
             return 0.0;
         }
-        ((need - a_rw) / a_g).clamp(0.0, 1.0)
+        let u = (need - a_rw) / a_g;
+        // even full throttle can't win against the aero moment: thrusting would only push the
+        // booster along its current (wrong) axis; coast until the air thins instead
+        if u > 1.0 { 0.0 } else { u.max(0.0) }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -686,6 +692,16 @@ impl Flight {
     }
 
     fn descent_guidance(&mut self, n: &Nav) {
+        if self.stats.abort > 0 {
+            // declared abort: no steering, just keep the target on the predicted touchdown point
+            let p = self.pip_at(n, n.v, n.m, (0.0, 0.0));
+            if p.ok {
+                let (e, nn) = Pad::ksc().ground_offset(p.x);
+                self.target = (e + self.swing_bias.0, nn + self.swing_bias.1);
+            }
+            self.aoa = (0.0, 0.0);
+            return;
+        }
         // the predictor assumes an engine-first attitude: while the booster is still swinging
         // round (e.g. right after an in-atmosphere boostback) its predictions are meaningless
         let aoa_now = n.up.dot(-n.v.normalized()).clamp(-1.0, 1.0).acos().to_degrees();
@@ -1148,6 +1164,12 @@ impl Flight {
                         if debug() {
                             eprintln!("  BB cutoff: dvn {dvn:.2} overshot {overshot} landing {landing_due} off_axis {off_axis} pip_ok {pip_ok} time {} fuel {} fails {} dot {:.2}", self.t_phase > limit, p_left <= 1e-6, self.bb_fail, self.bb_dv.dot(n.up));
                         }
+                        // the main boostback timed out far from done: the booster could not hold its
+                        // burn attitude (aero moment beyond wheels + gimbal); the pad is out of
+                        // reach, land at the predicted touchdown point instead
+                        if self.stats.trim_burns == 0 && self.t_phase > limit && dvn > (0.05 * self.bb_plan_max).max(5.0) {
+                            self.stats.abort = 2;
+                        }
                         let m_sep = self.stats.sep_mass;
                         let ve = propulsion(self.spec(), 0.0).isp * ENGINE_G0;
                         self.stats.bb_dv_used = ve * (m_sep / n.m).ln();
@@ -1370,7 +1392,10 @@ impl Flight {
         let (r, v, _) = self.landing_state(n);
         let t_now = self.st.ut;
         // hand over to the baseline's terminal logic early enough for this craft's attitude lag
-        let handover = gfold::TERMINAL_TGO.max(3.0 * self.swing_time(n, 0.5));
+        // the baseline's terminal logic gets its full final divert: its tail (hold segment plus two
+        // swings) plus three more swing times of convergence
+        let sw = self.swing_time(n, 0.5);
+        let handover = gfold::TERMINAL_TGO.max(TAIL_S.max(self.hold_height() / self.cfg.v_td.max(0.1) + 2.0 * sw) + 3.0 * sw);
         let need_plan = match &self.gplan {
             None => true,
             Some(p) => t_now - p.t0 >= gfold::REPLAN_DT && p.t_go(t_now) > handover,

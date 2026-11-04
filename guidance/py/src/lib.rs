@@ -47,7 +47,7 @@ const STAT_FIELDS: &[&str] = &[
     "sep_t", "sep_alt", "sep_speed", "sep_vh", "sep_vz", "sep_downrange", "sep_mass", "sep_prop_frac", "bb_dv_plan", "bb_dv_used",
     "bb_end_err", "apo_alt", "entry_err", "ign_alt", "ign_speed", "ign_err", "ign_t", "td_t", "td_e", "td_n", "td_vz", "td_vh",
     "td_tilt_deg", "final_e", "final_n", "final_tilt_deg", "prop_left", "prop_cap", "dv_left", "landing_dv", "max_q_descent",
-    "gfold_solves", "gfold_fail", "trim_burns", "trim_dv", "abort", "sep_need", "sep_have",
+    "gfold_solves", "gfold_fail", "trim_burns", "trim_dv", "abort", "sep_need", "sep_have", "divert", "ign_reach", "swing_burn_s",
 ];
 
 fn stat(s: &Stats, k: &str) -> f64 {
@@ -61,6 +61,7 @@ fn stat(s: &Stats, k: &str) -> f64 {
         "prop_cap" => s.prop_cap, "dv_left" => s.dv_left, "landing_dv" => s.landing_dv, "max_q_descent" => s.max_q_descent,
         "gfold_solves" => s.gfold_solves as f64, "gfold_fail" => s.gfold_fail as f64, "trim_burns" => s.trim_burns as f64,
         "trim_dv" => s.trim_dv, "abort" => s.abort as f64, "sep_need" => s.sep_need, "sep_have" => s.sep_have,
+        "divert" => s.divert as f64, "ign_reach" => s.ign_reach, "swing_burn_s" => s.swing_burn_s,
         _ => f64::NAN,
     }
 }
