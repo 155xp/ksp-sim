@@ -7,3 +7,7 @@ pub mod craft;
 pub mod partlib;
 pub mod nav;
 pub mod predict;
+pub mod attitude;
+pub mod gfold;
+pub mod mission;
+pub mod landing;

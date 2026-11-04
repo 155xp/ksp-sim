@@ -187,35 +187,49 @@ pub fn aero_force(spec: &VesselSpec, com_l: V3, q: Quat, v: V3, w: V3, atm: &Atm
 }
 
 /// Per-craft aero tables for the engine-first attitude tilted by angle of attack `alpha`
-/// (between the vessel's -up axis and the airflow-relative velocity):
-/// `cd[m][a]` = drag / (q * pseudoRe) (kN/kPa), `cl[m][a]` = side force along the tilt direction / q,
-/// `cm[m][a]` = aero torque about the tilt axis / q (kN m / kPa, positive = increases alpha).
+/// (between the vessel's up axis and -v, the airflow axis) toward body azimuth `phi` (tilt
+/// direction in the root x-z plane, deg from +X toward +Z):
+/// `cd` = drag / (q * pseudoRe) (kN/kPa), `cl` = side force along the tilt direction / q,
+/// `cs` = side force perpendicular to the tilt plane / q (along airflow-axis x tilt direction;
+/// non-zero between the box faces' symmetry azimuths),
+/// `cm` = aero torque about the tilt axis / q (kN m / kPa, positive = increases alpha).
+/// Drag cubes are boxes, so lift at a given alpha differs by ~25 % between body-axis and diagonal
+/// tilts; `phi` captures that (and leg asymmetry).
 #[derive(Clone, Debug)]
 pub struct AeroTables {
     pub mach_step: f64,
     pub alpha_step_deg: f64,
     pub n_mach: usize,
     pub n_alpha: usize,
+    pub n_phi: usize,
     pub cd: Vec<f64>,
     pub cl: Vec<f64>,
+    pub cs: Vec<f64>,
     pub cm: Vec<f64>,
 }
 
 pub const TABLE_MACH_MAX: f64 = 12.0;
 pub const TABLE_ALPHA_MAX_DEG: f64 = 30.0;
+const N_PHI: usize = 24;
+
+/// Tilt azimuth (deg) of direction `t` in the vessel's body x-z plane, using the body X axis
+/// `body_x` re-orthogonalised against the thrust axis `axis`.
+pub fn tilt_azimuth(body_x: V3, axis: V3, t: V3) -> f64 {
+    let x = (body_x - axis * body_x.dot(axis)).normalized();
+    let z = x.cross(axis);
+    t.dot(z).atan2(t.dot(x)).to_degrees()
+}
 
 impl AeroTables {
     /// Tabulate from the aero model at a reference fuel state (CoM matters for the moment only).
     pub fn build(spec: &VesselSpec, res: &[f64; N_RES]) -> AeroTables {
         let (_, com_l, _) = spec.mass_props(res);
-        let mach_step = 0.05;
+        let mach_step = 0.1;
         let alpha_step_deg = 2.0;
         let n_mach = (TABLE_MACH_MAX / mach_step) as usize + 1;
         let n_alpha = (TABLE_ALPHA_MAX_DEG / alpha_step_deg) as usize + 1;
-        let mut t = AeroTables { mach_step, alpha_step_deg, n_mach, n_alpha, cd: vec![0.0; n_mach * n_alpha], cl: vec![0.0; n_mach * n_alpha], cm: vec![0.0; n_mach * n_alpha] };
-        // reference flow: velocity along -Y in a frame where the vessel is rotated by alpha about
-        // root X (tilt direction = root +Z) and root Z (tilt direction = root -X); averaged over
-        // both roll orientations so 3- and 4-leg layouts read the same
+        let sz = n_mach * n_alpha * N_PHI;
+        let mut t = AeroTables { mach_step, alpha_step_deg, n_mach, n_alpha, n_phi: N_PHI, cd: vec![0.0; sz], cl: vec![0.0; sz], cs: vec![0.0; sz], cm: vec![0.0; sz] };
         let rho = 1.0;
         let c = 300.0;
         for im in 0..n_mach {
@@ -224,52 +238,88 @@ impl AeroTables {
             let q_kpa = 0.0005 * rho * spd * spd;
             let atm = AtmState { p_kpa: 50.0, t: 250.0, rho, c, mach, q_kpa, pseudo_re_drag_mult: 1.0 };
             for ia in 0..n_alpha {
-                let a = (ia as f64 * alpha_step_deg).to_radians();
-                let mut acc = (0.0, 0.0, 0.0);
-                for (axis, tilt) in [(v3(1.0, 0.0, 0.0), v3(0.0, 0.0, 1.0)), (v3(0.0, 0.0, 1.0), v3(-1.0, 0.0, 0.0))] {
-                    // vessel up = (0,1,0) rotated by a about `axis`; flow along -world Y.
-                    let q = Quat::angle_axis(a.to_degrees(), axis);
-                    let up = q.rotate(v3(0.0, 1.0, 0.0));
-                    let v = v3(0.0, -spd, 0.0);
-                    let (f, tq) = aero_force(spec, com_l, q, v, V3::ZERO, &atm);
-                    let tdir = (up - v3(0.0, 1.0, 0.0) * up.y).normalized();
-                    let tdir = if a == 0.0 { q.rotate(tilt) } else { tdir };
-                    let drag = f.y; // flow along -Y: drag points +Y
-                    let side = f.dot(tdir);
-                    // torque about the tilt rotation axis (positive = increases alpha)
-                    let mom = tq.dot(axis);
-                    acc.0 += drag / q_kpa;
-                    acc.1 += side / q_kpa;
-                    acc.2 += mom / q_kpa;
+                let a = ia as f64 * alpha_step_deg;
+                for ip in 0..N_PHI {
+                    let phi = (ip as f64 * 360.0 / N_PHI as f64).to_radians();
+                    let tb = v3(phi.cos(), 0.0, phi.sin());
+                    // rotating +Y about (Y x t) by +a tilts it toward t; flow along -world Y
+                    let axis = v3(0.0, 1.0, 0.0).cross(tb);
+                    let q = Quat::angle_axis(a, axis);
+                    let tdir = q.rotate(tb);
+                    let tdir = (tdir - v3(0.0, tdir.y, 0.0)).normalized();
+                    let (f, tq) = aero_force(spec, com_l, q, v3(0.0, -spd, 0.0), V3::ZERO, &atm);
+                    let k = (im * n_alpha + ia) * N_PHI + ip;
+                    t.cd[k] = f.y / q_kpa; // flow along -Y: drag points +Y
+                    t.cl[k] = f.dot(tdir) / q_kpa;
+                    t.cs[k] = f.dot(v3(0.0, 1.0, 0.0).cross(tdir)) / q_kpa;
+                    t.cm[k] = tq.dot(axis) / q_kpa;
                 }
-                let k = im * n_alpha + ia;
-                t.cd[k] = acc.0 * 0.5;
-                t.cl[k] = acc.1 * 0.5;
-                t.cm[k] = acc.2 * 0.5;
             }
         }
         t
     }
 
     #[inline]
-    fn interp(&self, tab: &[f64], mach: f64, alpha_deg: f64) -> f64 {
+    fn interp(&self, tab: &[f64], mach: f64, alpha_deg: f64, phi_deg: Option<f64>) -> f64 {
         let fm = (mach / self.mach_step).clamp(0.0, (self.n_mach - 1) as f64 - 1e-9);
         let fa = (alpha_deg.abs() / self.alpha_step_deg).clamp(0.0, (self.n_alpha - 1) as f64 - 1e-9);
         let (im, ia) = (fm as usize, fa as usize);
         let (tm, ta) = (fm - im as f64, fa - ia as f64);
-        let at = |m: usize, a: usize| tab[m * self.n_alpha + a];
-        let a0 = at(im, ia) + (at(im, ia + 1) - at(im, ia)) * ta;
-        let a1 = at(im + 1, ia) + (at(im + 1, ia + 1) - at(im + 1, ia)) * ta;
+        let np = self.n_phi;
+        let at_phi = |m: usize, a: usize| -> f64 {
+            let base = (m * self.n_alpha + a) * np;
+            match phi_deg {
+                None => tab[base..base + np].iter().sum::<f64>() / np as f64,
+                Some(p) => {
+                    let fp = p.rem_euclid(360.0) / (360.0 / np as f64);
+                    let ip = (fp as usize) % np;
+                    let tp = fp - fp.floor();
+                    tab[base + ip] + (tab[base + (ip + 1) % np] - tab[base + ip]) * tp
+                }
+            }
+        };
+        let a0 = at_phi(im, ia) + (at_phi(im, ia + 1) - at_phi(im, ia)) * ta;
+        let a1 = at_phi(im + 1, ia) + (at_phi(im + 1, ia + 1) - at_phi(im + 1, ia)) * ta;
         a0 + (a1 - a0) * tm
     }
+    /// Roll-averaged lookups (exact at alpha = 0).
     pub fn cd(&self, mach: f64, alpha_deg: f64) -> f64 {
-        self.interp(&self.cd, mach, alpha_deg)
+        self.interp(&self.cd, mach, alpha_deg, None)
     }
     pub fn cl(&self, mach: f64, alpha_deg: f64) -> f64 {
-        self.interp(&self.cl, mach, alpha_deg)
+        self.interp(&self.cl, mach, alpha_deg, None)
     }
     pub fn cm(&self, mach: f64, alpha_deg: f64) -> f64 {
-        self.interp(&self.cm, mach, alpha_deg)
+        self.interp(&self.cm, mach, alpha_deg, None)
+    }
+    /// Lookups at tilt azimuth `phi` (deg); `None` = roll average.
+    pub fn cd_at(&self, mach: f64, alpha_deg: f64, phi: Option<f64>) -> f64 {
+        self.interp(&self.cd, mach, alpha_deg, phi)
+    }
+    pub fn cl_at(&self, mach: f64, alpha_deg: f64, phi: Option<f64>) -> f64 {
+        self.interp(&self.cl, mach, alpha_deg, phi)
+    }
+    pub fn cs_at(&self, mach: f64, alpha_deg: f64, phi: Option<f64>) -> f64 {
+        self.interp(&self.cs, mach, alpha_deg, phi)
+    }
+    pub fn cm_at(&self, mach: f64, alpha_deg: f64, phi: Option<f64>) -> f64 {
+        self.interp(&self.cm, mach, alpha_deg, phi)
+    }
+    /// Largest angle of attack (deg, <= 20) at tilt azimuth `phi` whose aero moment at dynamic
+    /// pressure q stays within `torque` (kN m), interpolated between table rows.
+    pub fn alpha_limit(&self, mach: f64, q_kpa: f64, torque: f64, phi: Option<f64>) -> f64 {
+        let mut prev = 0.0;
+        let mut a = self.alpha_step_deg;
+        while a <= 20.0 + 1e-9 {
+            let m = self.cm_at(mach, a, phi).abs() * q_kpa;
+            if m > torque {
+                let mp = self.cm_at(mach, prev, phi).abs() * q_kpa;
+                return prev + (a - prev) * ((torque - mp) / (m - mp).max(1e-12)).clamp(0.0, 1.0);
+            }
+            prev = a;
+            a += self.alpha_step_deg;
+        }
+        20.0
     }
 }
 
@@ -365,5 +415,44 @@ mod tests {
         assert!((cda - 0.72).abs() < 0.05, "{cda}");
         // tilting produces a side force
         assert!(t.cl(0.5, 10.0).abs() > 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod table_vs_direct {
+    use super::*;
+    use ksp_core::vessel::Craft;
+
+    /// Table model force == direct cube force for arbitrary attitudes (roll azimuth included).
+    #[test]
+    fn table_matches_direct_force() {
+        let spec = VesselSpec::compile(&Craft::hopper());
+        let res = spec.full_resources();
+        let t = AeroTables::build(&spec, &res);
+        let (_, com_l, _) = spec.mass_props(&res);
+        let v = v3(0.3, -1.0, 0.2).normalized() * 340.0;
+        let vh = v.normalized();
+        let atm = AtmState { p_kpa: 50.0, t: 250.0, rho: 0.6, c: 300.0, mach: 340.0 / 300.0, q_kpa: 0.0005 * 0.6 * 340.0 * 340.0, pseudo_re_drag_mult: 1.0 };
+        let mut worst: f64 = 0.0;
+        for k in 0..12 {
+            let az = k as f64 * 30.0 + 7.0;
+            let a = 8.0f64;
+            // a tilt direction perpendicular to the flow axis, then the attitude
+            let ref1 = v3(1.0, 0.0, 0.0);
+            let e1 = (ref1 - (-vh) * ref1.dot(-vh)).normalized();
+            let e2 = (-vh).cross(e1);
+            let tp = e1 * az.to_radians().cos() + e2 * az.to_radians().sin();
+            let up = -vh * a.to_radians().cos() + tp * a.to_radians().sin();
+            let q = ksp_core::sim::attitude(up, v3(0.0, 0.0, 1.0));
+            let (f, _) = aero_force(&spec, com_l, q, v, V3::ZERO, &atm);
+            let phi = tilt_azimuth(q.rotate(v3(1.0, 0.0, 0.0)), -vh, tp);
+            let fm = -vh * (atm.q_kpa * t.cd_at(atm.mach, a, Some(phi))) + tp * (atm.q_kpa * t.cl_at(atm.mach, a, Some(phi))) + (-vh).cross(tp) * (atm.q_kpa * t.cs_at(atm.mach, a, Some(phi)));
+            let lat_d = f - vh * f.dot(vh);
+            let lat_m = fm - vh * fm.dot(vh);
+            let e = (lat_d - lat_m).norm() / lat_d.norm().max(1e-9);
+            println!("az {az:5.1} phi {phi:7.1}: lateral direct ({:.2} along t, {:.2} side) model ({:.2}, {:.2})  rel err {e:.3}", lat_d.dot(tp), lat_d.dot((-vh).cross(tp)), lat_m.dot(tp), lat_m.dot((-vh).cross(tp)));
+            worst = worst.max(e);
+        }
+        assert!(worst < 0.05, "{worst}");
     }
 }

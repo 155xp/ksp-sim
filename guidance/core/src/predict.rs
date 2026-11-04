@@ -27,6 +27,9 @@ pub struct PredCraft<'a> {
     pub h_td: f64,
     /// GetAtmoThermalStats temperature offset (K) cached in the sim state
     pub toff: f64,
+    /// vessel root +X axis (body-fixed) at the prediction start: roll is assumed held, which
+    /// fixes the body azimuth of any tilt (ZERO = use roll-averaged tables)
+    pub body_x: V3,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -39,8 +42,10 @@ pub struct LandingBurnModel {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PredOpts {
-    /// constant angle of attack command (deg) as a horizontal ENU tilt vector (east, north):
-    /// the vessel's -up axis is tilted from the airflow toward this direction
+    /// angle-of-attack command as a horizontal ENU tilt vector (east, north): the thrust axis
+    /// (nominally -v_hat, engine-first) is tilted toward this direction. With `aoa_torque` > 0
+    /// the vector is a fraction (|.| <= 1) of the largest angle the craft can hold at each point
+    /// of the path, else degrees. Unpowered flight only (the landing burn flies at zero AoA).
     pub aoa: (f64, f64),
     pub burn: Option<LandingBurnModel>,
     /// constant extra thrust burn for the first `burn_time` s (kN vector, body-fixed), boostback
@@ -49,6 +54,11 @@ pub struct PredOpts {
     pub max_time: f64,
     /// apply the semi-implicit-Euler half-step velocity offset
     pub sim_offset: bool,
+    /// stop when descending through this altitude (m ASL) instead of at the ground
+    pub stop_alt: Option<f64>,
+    /// aero torque (kN m) the craft can hold against: the commanded angle of attack is clipped
+    /// along the path to where |moment| <= this (0 = no limit)
+    pub aoa_torque: f64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -81,10 +91,10 @@ fn ground_r() -> f64 {
     KERBIN.radius + ksc::KSC_PAD_DECK_ALT
 }
 
-/// Acceleration (m/s^2) and mass rate for point-mass state `s` with throttle `u` along `-v_hat`
-/// (landing burn) or extra thrust `f_ext` (kN).
+/// Acceleration (m/s^2) and mass rate for point-mass state `s` with landing-burn throttle `u`
+/// along `bdir`, or extra thrust `f_ext` (kN).
 #[inline]
-fn deriv(c: &PredCraft, o: &PredOpts, pad: &Pad, s: &S, u: f64, f_ext: V3, mdot_ext: f64) -> (V3, f64, f64) {
+fn deriv(c: &PredCraft, o: &PredOpts, pad: &Pad, s: &S, u: f64, bdir: V3, f_ext: V3, mdot_ext: f64) -> (V3, f64, f64) {
     let r2 = s.x.norm2();
     let r = r2.sqrt();
     let alt = r - KERBIN.radius;
@@ -98,20 +108,33 @@ fn deriv(c: &PredCraft, o: &PredOpts, pad: &Pad, s: &S, u: f64, f_ext: V3, mdot_
             q_kpa = atm.q_kpa;
             let vh = s.v / spd;
             let (ae, an) = o.aoa;
-            let amag = (ae * ae + an * an).sqrt();
-            let cd = c.tables.cd(atm.mach, amag);
+            let lam = (ae * ae + an * an).sqrt();
+            let mut amag = if u > 0.0 { 0.0 } else { lam };
+            let (tp, phi) = if lam > 1e-12 {
+                let t = pad.e * (ae / lam) + pad.n * (an / lam);
+                let tp = (t - vh * t.dot(vh)).normalized();
+                let phi = if c.body_x.norm2() > 0.0 { Some(crate::nav::tilt_azimuth(c.body_x, -vh, tp)) } else { None };
+                (tp, phi)
+            } else {
+                (V3::ZERO, None)
+            };
+            if amag > 0.0 && o.aoa_torque > 0.0 {
+                amag = lam.min(1.0) * c.tables.alpha_limit(atm.mach, q_kpa, o.aoa_torque, phi);
+            }
+            let cd = c.tables.cd_at(atm.mach, amag, phi);
             let mut f = vh * (-(q_kpa * cd * atm.pseudo_re_drag_mult));
             if amag > 1e-9 {
-                let t = pad.e * (ae / amag) + pad.n * (an / amag);
-                let tp = (t - vh * t.dot(vh)).normalized();
-                f += tp * (q_kpa * c.tables.cl(atm.mach, amag));
+                f += tp * (q_kpa * c.tables.cl_at(atm.mach, amag, phi));
+                if phi.is_some() {
+                    f += (-vh).cross(tp) * (q_kpa * c.tables.cs_at(atm.mach, amag, phi));
+                }
             }
             a += f / s.m;
         }
     }
-    if u > 0.0 && spd > 1e-6 {
+    if u > 0.0 {
         let pr = propulsion(c.spec, p_atm(alt));
-        a += s.v * (-(pr.thrust * u / (s.m * spd)));
+        a += bdir * (pr.thrust * u / s.m);
         dm -= pr.mdot * u;
     }
     if f_ext.norm2() > 0.0 {
@@ -127,27 +150,33 @@ fn height(c: &PredCraft, x: V3) -> f64 {
     x.norm() - ground_r() - c.h_td
 }
 
-/// Throttle the suicide-burn rule needs to stop at h = 0 from (h, v) along -v_hat, accounting for
-/// drag's vertical component; also returns cos(theta) of the thrust from vertical.
-pub fn suicide_throttle(spec: &VesselSpec, tables: &AeroTables, toff: f64, x: V3, v: V3, m: f64, h: f64, v_td: f64) -> f64 {
+/// The landing-burn requirement at (x, v, m, h): the thrust acceleration that brings the vertical
+/// speed to `v_td` at h = 0 under constant deceleration while nulling horizontal velocity over the
+/// same time (drag, gravity included). Returns (throttle needed as a fraction of max thrust,
+/// thrust direction, body-fixed). The landing guidance ignites when the throttle reaches f_ign.
+pub fn landing_need(spec: &VesselSpec, tables: &AeroTables, toff: f64, x: V3, v: V3, m: f64, h: f64, v_td: f64) -> (f64, V3) {
     let up = x.normalized();
     let vz = v.dot(up);
+    if vz >= -v_td {
+        return (0.0, up);
+    }
     let r = x.norm();
     let g = KERBIN.gm() / (r * r);
-    if vz >= -v_td {
-        return 0.0;
-    }
     let spd = v.norm();
     let alt = r - KERBIN.radius;
-    let cos_t = (-vz / spd).max(0.05);
     let atm = atm_at(alt, spd, toff);
-    let d_up = if atm.rho > 0.0 { atm.q_kpa * tables.cd(atm.mach, 0.0) * atm.pseudo_re_drag_mult * cos_t } else { 0.0 };
-    let a_stop = (vz * vz - v_td * v_td) / (2.0 * h.max(0.1));
+    let drag = if atm.rho > 0.0 { v * (-(atm.q_kpa * tables.cd(atm.mach, 0.0) * atm.pseudo_re_drag_mult) / (m * spd)) } else { V3::ZERO };
+    let hh = h.max(0.1);
+    let a_z = (vz * vz - v_td * v_td) / (2.0 * hh);
+    let t_s = 2.0 * hh / (-vz + v_td);
+    let vh = v - up * vz;
+    let a_kin = up * a_z - vh / t_s;
+    let a_t = a_kin + up * g - drag;
     let pr = propulsion(spec, p_atm(alt));
     if pr.thrust <= 0.0 {
-        return f64::INFINITY;
+        return (f64::INFINITY, up);
     }
-    (m * (a_stop + g) - d_up) / (pr.thrust * cos_t)
+    (m * a_t.norm() / pr.thrust, a_t.normalized())
 }
 
 /// Predict the trajectory from body-fixed CoM state (x, v) and mass m.
@@ -162,7 +191,7 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
     };
     if o.sim_offset {
         let fe = if o.burn_time > 0.0 { o.thrust } else { V3::ZERO };
-        let (a0, _, _) = deriv(c, o, &pad, &s, 0.0, fe, 0.0);
+        let (a0, _, _) = deriv(c, o, &pad, &s, 0.0, V3::ZERO, fe, 0.0);
         s.v += a0 * (0.5 * FIXED_DT);
     }
     let mut res = PredResult::default();
@@ -183,11 +212,13 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
         if ignited {
             dt = dt.min(0.1);
         }
-        // landing-burn throttle (held over the step)
+        // landing-burn throttle and direction (held over the step)
         let mut u = 0.0;
+        let mut bdir = V3::ZERO;
         if let Some(b) = o.burn {
-            if vz < 0.0 {
-                let need = suicide_throttle(c.spec, c.tables, c.toff, s.x, s.v, s.m, h, b.v_td);
+            if vz < 0.0 || ignited {
+                let (need, dir) = landing_need(c.spec, c.tables, c.toff, s.x, s.v, s.m, h, b.v_td);
+                bdir = dir;
                 if !ignited && need >= b.f_ign && alt < KERBIN.atmosphere_depth {
                     ignited = true;
                     res.ign_h = h;
@@ -206,7 +237,7 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
         let fe = if o.burn_time > 0.0 && t < o.burn_time { o.thrust } else { V3::ZERO };
         let md = if fe.norm2() > 0.0 { mdot_ext } else { 0.0 };
         // RK4
-        let f = |st: &S| deriv(c, o, &pad, st, u, fe, md);
+        let f = |st: &S| deriv(c, o, &pad, st, u, bdir, fe, md);
         let (a1, m1, q1) = f(&s);
         let s2 = S { x: s.x + s.v * (0.5 * dt), v: s.v + a1 * (0.5 * dt), m: s.m + m1 * 0.5 * dt };
         let (a2, m2, _) = f(&s2);
@@ -219,6 +250,16 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
         let nm = (s.m + (m1 + 2.0 * m2 + 2.0 * m3 + m4) * (dt / 6.0)).max(c.m_dry.min(s.m));
         res.max_q = res.max_q.max(q1);
         let nh = height(c, nx);
+        if let Some(sa) = o.stop_alt {
+            if nx.norm() - KERBIN.radius < sa && nv.dot(nx) < 0.0 {
+                res.x = nx;
+                res.v = nv;
+                res.t = t + dt;
+                res.m = nm;
+                res.ok = true;
+                return res;
+            }
+        }
         // burn finished: stopped above the ground -> assume a vertical drop at v_td from there
         if let Some(b) = o.burn {
             if ignited && nv.dot(nx.normalized()) >= -b.v_td && nh > 0.0 {
@@ -286,7 +327,7 @@ mod tests {
         st.res = res;
         let n0 = nav(&spec, &st);
         let h_td = crate::nav::touchdown_height(&spec, n0.com_l);
-        let c = PredCraft { spec: &spec, tables: &tables, m_dry: spec.dry_mass(), h_td, toff: 0.0 };
+        let c = PredCraft { spec: &spec, tables: &tables, m_dry: spec.dry_mass(), h_td, toff: 0.0, body_x: n0.q.rotate(v3(1.0, 0.0, 0.0)) };
         let p = predict(&c, &PredOpts { sim_offset: true, ..Default::default() }, n0.x, n0.v, n0.m);
         assert!(p.ok);
         // fly the sim, re-pointing engine-first along the airflow every tick
@@ -311,5 +352,70 @@ mod tests {
         println!("sim t {t:.2} pred t {:.2}; err {err:.2} m ({e1:.1},{n1:.1}) vs ({e2:.1},{n2:.1})", p.t);
         assert!(err < 5.0, "{err}");
         assert!((p.t - t).abs() < 0.2);
+    }
+}
+
+#[cfg(test)]
+mod aoa_tests {
+    use super::*;
+    use crate::nav::{atm_at, nav, AeroTables};
+    use ksp_core::math::v3;
+    use ksp_core::sim::{self, Control, Params};
+    use ksp_core::vessel::Craft;
+
+    /// Same as `ballistic_matches_sim` but flying a constant tilt fraction of the holdable angle
+    /// of attack (attitude imposed every tick), to check the lift / AoA-drag model.
+    #[test]
+    fn aoa_steering_matches_sim() {
+        let spec = VesselSpec::compile(&Craft::hopper());
+        let mut res = spec.full_resources();
+        res[0] *= 0.1;
+        res[1] *= 0.1;
+        let tables = AeroTables::build(&spec, &res);
+        let pad = Pad::ksc();
+        let prm = Params { ground: false, sun_temperature: false, ..Params::default() };
+        let v0 = v3(150.0, -40.0, -350.0);
+        let q = sim::attitude(-(pad.vec_from_enu(v0)).normalized(), pad.n);
+        let mut st = sim::state_at_pad(&spec, v3(-3000.0, 1000.0, 15000.0), v0, q, V3::ZERO, 0.0);
+        st.res = res;
+        let n0 = nav(&spec, &st);
+        let h_td = crate::nav::touchdown_height(&spec, n0.com_l);
+        let torque = 2.5;
+        // tilt command (east, north) fraction; override with KSPG_TEST_LAM="e,n"
+        let lam = std::env::var("KSPG_TEST_LAM").ok().and_then(|s| {
+            let v: Vec<f64> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            (v.len() == 2).then(|| (v[0], v[1]))
+        }).unwrap_or((0.8, 0.3));
+        let c = PredCraft { spec: &spec, tables: &tables, m_dry: spec.dry_mass(), h_td, toff: 0.0, body_x: n0.q.rotate(v3(1.0, 0.0, 0.0)) };
+        let p = predict(&c, &PredOpts { sim_offset: true, aoa: lam, aoa_torque: torque, ..Default::default() }, n0.x, n0.v, n0.m);
+        let p0 = predict(&c, &PredOpts { sim_offset: true, ..Default::default() }, n0.x, n0.v, n0.m);
+        loop {
+            let n = nav(&spec, &st);
+            if n.x.norm() - (KERBIN.radius + ksc::KSC_PAD_DECK_ALT) - h_td <= 0.0 {
+                break;
+            }
+            let vh = n.v.normalized();
+            let atm = atm_at(n.alt, n.v.norm(), 0.0);
+            let lm = (lam.0 * lam.0 + lam.1 * lam.1).sqrt();
+            let t = (pad.e * lam.0 + pad.n * lam.1) / lm;
+            let tp = (t - vh * t.dot(vh)).normalized();
+            let phi = crate::nav::tilt_azimuth(st.q.rotate(v3(1.0, 0.0, 0.0)), -vh, tp);
+            let a = lm.min(1.0) * tables.alpha_limit(atm.mach, atm.q_kpa, torque, Some(phi));
+            let dir = -vh * a.to_radians().cos() + tp * a.to_radians().sin();
+            st.q = sim::attitude(dir, pad.n);
+            st.w = V3::ZERO;
+            st.x = n.x - st.q.rotate(n.com_l);
+            st.v = n.v;
+            sim::tick(&spec, &prm, &mut st, &Control::default());
+        }
+        let n = nav(&spec, &st);
+        let (e1, n1) = pad.ground_offset(n.x);
+        let (e2, n2) = pad.ground_offset(p.x);
+        let (e3, n3) = pad.ground_offset(p0.x);
+        let err = ((e1 - e2).powi(2) + (n1 - n2).powi(2)).sqrt();
+        let moved = ((e2 - e3).powi(2) + (n2 - n3).powi(2)).sqrt();
+        println!("aoa: sim ({e1:.1},{n1:.1}) pred ({e2:.1},{n2:.1}) err {err:.2} m; steering moved it ({:.1},{:.1})", e2 - e3, n2 - n3);
+        // a few km of lift-driven displacement predicted to within a few percent
+        assert!(err < 0.05 * moved, "{err} of {moved}");
     }
 }

@@ -220,7 +220,7 @@ const FAMILIES: [Family; 3] = [
         battery: "batteryBank",
         upper: &["fuelTank", "fuelTank_long"],
         nose: "noseCone",
-        max_tanks: 4,
+        max_tanks: 5,
     },
     Family {
         size: 2,
@@ -327,8 +327,13 @@ pub fn sample_design(rng: &mut Rng, size: Option<u8>) -> BoosterDesign {
             upper_fill: fill,
             nose: fam.nose.to_string(),
         };
-        if build(&d).is_ok() {
-            return d;
+        // keep designs whose real stack liftoff TWR is in range (tank granularity can miss it)
+        if let Ok(b) = build(&d) {
+            let (ms, _, _) = b.stack.mass_props(&b.stack.full_resources());
+            let twr = thrust / (ms * 9.81);
+            if (1.15..=2.4).contains(&twr) {
+                return d;
+            }
         }
     }
 }
