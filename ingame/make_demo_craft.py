@@ -62,6 +62,7 @@ NODES = {
     "probeStackSmall": (0.1, -0.1),                # RC-001S (+ kOS by patch)
     "batteryBank": (0.1108553, -0.1108553),        # Z-1k
     "advSasModule": (0.1990267, -0.1990267),       # small inline reaction wheel
+    "noseCone": (0.0, 0.0),                        # aerodynamic nose cone (bottom node at 0)
     "fuelTank_long": (1.875, -1.8875),             # FL-T800
     "fuelTank": (0.981725, -0.9125),               # FL-T400
     "liquidEngine2_v2": (0.0, -1.63),              # Swivel
@@ -109,34 +110,55 @@ def write(path, ship, parts, parent, stage_of):
                   "\tsqor = -1", "\tsepI = -1", f"\tattm = {1 if p.get('srf') else 0}", "\tmodCost = 0", "\tmodMass = 0", "\tmodSize = 0,0,0"]
         for c in kids[i]:
             lines.append(f"\tlink = {ids[c]}")
+        bottom_node = "bottom01" if p["name"] == "noseCone" else "bottom"
         if p.get("srf"):
             lines.append(f"\tsrfN = srfAttach,{ids[parent[i]]}")
         else:
+            # stack links: a part above its parent attaches by its bottom node to the parent's top
             if i in parent:
-                lines.append(f"\tattN = top,{ids[parent[i]]}")
+                above = p["pos"][1] > parts[parent[i]]["pos"][1]
+                lines.append(f"\tattN = {bottom_node if above else 'top'},{ids[parent[i]]}")
             for c in kids[i]:
                 if not parts[c].get("srf"):
-                    lines.append(f"\tattN = bottom,{ids[c]}")
+                    above = parts[c]["pos"][1] > p["pos"][1]
+                    lines.append(f"\tattN = {'top' if above else bottom_node},{ids[c]}")
         lines += ["}"]
     open(path, "w").write("\n".join(lines) + "\n")
 
 
+def stack_from(names, root_name, y0=10.0):
+    """root part at y0, `names` stacked below it (top to bottom)."""
+    return stack([root_name] + names, y0=y0)
+
+
+def place_above(parts, child_idx, name):
+    top, _ = NODES[parts[child_idx]["name"]]
+    _, bot = NODES[name]
+    y = parts[child_idx]["pos"][1] + top - bot
+    parts.append({"name": name, "pos": np.array([0.0, y, 0.0]), "rot": (0.0, 0.0, 0.0, 1.0)})
+    return len(parts) - 1
+
+
 def main(out):
-    names = ["mk1pod_v2", "fuelTankSmall", "liquidEngine3_v2", "Decoupler_1",
-             "probeStackSmall", "batteryBank", "advSasModule", "fuelTank_long", "fuelTank", "liquidEngine2_v2"]
-    parts = stack(names, y0=10.0)
-    parent = {i: i - 1 for i in range(1, len(names))}
-    i_t800, i_t400 = names.index("fuelTank_long"), names.index("fuelTank")
-    # 4 LT-2 legs on the FL-T400, 0.9 m below its centre (the harness hopper's pad-tested placement)
-    for k in range(4):
+    # Same craft as guidance/core/src/ingame.rs (the sim's copy): booster first, root = Mk1 pod.
+    parts = stack(["mk1pod_v2", "fuelTank_long", "fuelTank", "liquidEngine2_v2"], y0=10.0)
+    parent = {1: 0, 2: 1, 3: 2}
+    i_t800, i_t400 = 1, 2
+    # 4 LT-2 legs on the FL-T400, 0.9 m below its centre (ingame.rs LEG_AZ / LEG_Y)
+    for az in (45.0, 135.0, 225.0, 315.0):
         parent[len(parts)] = i_t400
-        parts.append(surface("landingLeg1-2", parts[i_t400], 45.0 + 90.0 * k, -0.9, LT2_NODE_POS, LT2_NODE_DIR))
-    # 4 airbrakes near the top of the FL-T800, between the legs' azimuths (grid-fin stand-ins)
-    for k in range(4):
+        parts.append(surface("landingLeg1-2", parts[i_t400], az, -0.9, LT2_NODE_POS, LT2_NODE_DIR))
+    # 4 airbrakes near the top of the FL-T800 (grid-fin stand-ins; ingame.rs AIRBRAKE_*)
+    for az in (0.0, 90.0, 180.0, 270.0):
         parent[len(parts)] = i_t800
-        parts.append(surface("airbrake1", parts[i_t800], 90.0 * k, 1.45, AB_NODE_POS, AB_NODE_DIR))
-    # staging: 2 = booster engine, 1 = decoupler, 0 = upper engine (kOS also drives them directly)
-    stage_of = {names.index("liquidEngine2_v2"): 2, names.index("Decoupler_1"): 1, names.index("liquidEngine3_v2"): 0}
+        parts.append(surface("airbrake1", parts[i_t800], az, 1.45, AB_NODE_POS, AB_NODE_DIR))
+    # upper stage on the pod: TD-12 / Terrier (never lit) / FL-T400 / nose cone
+    dec = place_above(parts, 0, "Decoupler_1"); parent[dec] = 0
+    ter = place_above(parts, dec, "liquidEngine3_v2"); parent[ter] = dec
+    tank = place_above(parts, ter, "fuelTank"); parent[tank] = ter
+    nose = place_above(parts, tank, "noseCone"); parent[nose] = tank
+    # staging (the bridge fires the engine and the decoupler directly): 1 = booster engine, 0 = decoupler
+    stage_of = {3: 1, dec: 0}
     write(f"{out}/RTLSDemo.craft", "RTLS Demo", parts, parent, stage_of)
     for p in parts:
         print(p["name"], np.round(p["pos"], 4), np.round(p["rot"], 4))

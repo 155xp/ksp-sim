@@ -233,6 +233,26 @@ pub struct Flight {
     pub gplan: Option<gfold::Plan>,
     /// external terminal-phase action (normalised ENU acceleration command)
     pub ext_action: [f64; 3],
+    /// flown in the game through the bridge: the state is seeded each tick from the game
+    /// (`step_external`) and the command is returned instead of stepping the sim
+    pub external: bool,
+    pub ext_ctl: Control,
+    /// the guidance separated the stages this tick (the game must fire the decoupler)
+    pub ext_decouple: bool,
+}
+
+/// dynamic pressure (kPa) at which the coast hands over to the aero descent law
+/// (`KSPG_DESCENT_Q` overrides, for sweeps)
+pub fn descent_q_kpa() -> f64 {
+    static Q: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *Q.get_or_init(|| std::env::var("KSPG_DESCENT_Q").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0))
+}
+
+/// boostback aim past the pad as a fraction of downrange, for arcs in the dense air
+/// (`KSPG_AIM_LONG` overrides)
+pub fn aim_long_frac() -> f64 {
+    static Q: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *Q.get_or_init(|| std::env::var("KSPG_AIM_LONG").ok().and_then(|s| s.parse().ok()).unwrap_or(0.05))
 }
 
 /// `KSPG_DEBUG=1` prints guidance internals (single-flight debugging).
@@ -287,6 +307,9 @@ impl Flight {
             prop_at_ign: 0.0,
             gplan: None,
             ext_action: [0.0; 3],
+            external: false,
+            ext_ctl: Control::default(),
+            ext_decouple: false,
         }
     }
 
@@ -424,6 +447,7 @@ impl Flight {
         self.st.w += self.disp.sep_w;
         self.set_phase(Phase::Flip);
         self.bb_dv = V3::ZERO;
+        self.ext_decouple = true;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -926,7 +950,7 @@ impl Flight {
                                 if p.ok && p.apo < 50_000.0 {
                                     let (de, dn) = Pad::ksc().ground_offset(n.x);
                                     let d = (de * de + dn * dn).sqrt().max(1.0);
-                                    let b = (0.05 * d).min(800.0);
+                                    let b = (aim_long_frac() * d).min(800.0);
                                     self.aim_bias = (-de / d * b, -dn / d * b);
                                 }
                             }
@@ -1011,9 +1035,11 @@ impl Flight {
                     }
                 }
                 self.cmd_dir = self.entry_dir;
-                // in the air (descending, or a low apogee still inside the atmosphere): steer
-                let _ = vz;
-                if n.alt < KERBIN.atmosphere_depth {
+                // steer with the airframe only once descending in air dense enough for the angle
+                // of attack to move the touchdown point: near apogee the hold-this-AoA Jacobian is
+                // huge and inconsistent and the Newton loop limit-cycles (the 5 % MC tail)
+                let q_kpa = atm_at(n.alt, n.v.norm(), self.st.toff as f64).q_kpa;
+                if n.alt < KERBIN.atmosphere_depth && (descent_q_kpa() <= 0.0 || (vz < 0.0 && q_kpa > descent_q_kpa())) {
                     let pp = self.pip(&n, V3::ZERO, (0.0, 0.0));
                     let e = self.pip_err(&pp);
                     self.stats.entry_err = (e.0 * e.0 + e.1 * e.1).sqrt();
@@ -1088,10 +1114,44 @@ impl Flight {
     }
 
     fn tick_sim(&mut self, ctl: Control) {
+        if self.external {
+            self.ext_ctl = ctl;
+            return;
+        }
         let truth = *self.truth();
         let prm = self.prm;
         let info = sim::tick(&truth, &prm, &mut self.st, &ctl);
         self.last_thrust = info.thrust;
+        self.post_tick();
+    }
+
+    /// One game tick through the bridge: take the game's state (sim conventions, see
+    /// ingame/plugin/Bridge.cs), check touchdown / outcome on it exactly as after a sim tick,
+    /// then run the guidance and return its command for this same tick.
+    pub fn step_external(&mut self, mut st: EnvState, thrust: f64) -> Control {
+        st.toff = self.st.toff;
+        st.ticks = self.st.ticks + 1;
+        if st.toff.is_nan() {
+            // ksp-core caches the GetAtmoThermalStats offset on its first tick
+            let mut tmp = st;
+            sim::tick(self.truth(), &self.prm, &mut tmp, &Control::default());
+            st.toff = tmp.toff;
+        }
+        let first = self.st.ticks == 0 && self.phase == Phase::Ascent && self.t_phase == 0.0;
+        self.st = st;
+        self.last_thrust = thrust;
+        self.ext_decouple = false;
+        if !first {
+            self.post_tick();
+        }
+        self.ext_ctl = Control::default();
+        if !self.done() {
+            self.tick();
+        }
+        self.ext_ctl
+    }
+
+    fn post_tick(&mut self) {
         let n = nav(self.spec(), &self.st);
         let elapsed = self.st.ut - self.disp.ut;
         if self.phase != Phase::Ascent && self.phase != Phase::Touchdown && self.st.status != STATUS_FLYING {

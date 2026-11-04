@@ -14,3 +14,5 @@ harness/plugin/obj/
 ingame/plugin/bin/
 ingame/plugin/obj/
 .venv/
+ingame/telemetry/flight_*.csv
+ingame/telemetry/*.csv.gz

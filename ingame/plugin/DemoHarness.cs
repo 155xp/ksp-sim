@@ -28,6 +28,11 @@ namespace DemoHarness
         public static string CamFile => Path.Combine(Root, "Ships/Script/demo/cam.txt");
         public static void Log(string s) => Debug.Log("[DemoHarness] " + s);
         public static double D(string s) => double.Parse(s, C);
+        public static string LogDir => Path.Combine(Root, "SimHarnessLogs");
+        public static string R(double v) => v.ToString("R", C);
+        public static string V(Vector3d v) => R(v.x) + "," + R(v.y) + "," + R(v.z);
+        public static string V(Vector3 v) => R(v.x) + "," + R(v.y) + "," + R(v.z);
+        public static string Q(Quaternion q) => R(q.x) + "," + R(q.y) + "," + R(q.z) + "," + R(q.w);
     }
 
     [KSPAddon(KSPAddon.Startup.MainMenu, false)]
@@ -114,6 +119,11 @@ namespace DemoHarness
             cmd = lines[lines.Length - 1].Trim();
             if (cmd.Length == 0 || cmd == lastCmd) return;
             lastCmd = cmd;
+            Command(cmd);
+        }
+
+        public void Command(string cmd)
+        {
             H.Log("cam: " + cmd);
             var f = cmd.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
             var cam = FlightCamera.fetch;
