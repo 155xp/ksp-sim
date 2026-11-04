@@ -138,6 +138,11 @@ pub struct Trace {
     pub geom: Vec<GeomPart>,
     pub geom_end: Option<Vec<GeomPart>>,
     pub csv: Csv,
+    /// per-row scenery translation (see ground_shift_at)
+    pub gshift: Vec<V3>,
+    /// per-session KSC collider offset (sim::Scenery::ksc_dz), from the ground probe; 0 when
+    /// not logged (older traces fold everything into gshift)
+    pub ksc_dz: f64,
 }
 
 impl Trace {
@@ -145,7 +150,9 @@ impl Trace {
         let (header, geom) = parse_geometry(&std::fs::read_to_string(dir.join(format!("{name}.geometry.cfg")))?);
         let geom_end = std::fs::read_to_string(dir.join(format!("{name}.geometry.end.cfg"))).ok().map(|t| parse_geometry(&t).1);
         let csv = Csv::parse(&std::fs::read_to_string(dir.join(format!("{name}.csv")))?);
-        Ok(Trace { name: name.to_string(), header, geom, geom_end, csv })
+        let gshift = ground_shift_series(&csv);
+        let ksc_dz = ksc_dz_from_probe(&csv, &gshift);
+        Ok(Trace { name: name.to_string(), header, geom, geom_end, csv, gshift, ksc_dz })
     }
     /// VesselSpec from this trace's geometry (wheel colliders from the end dump if needed).
     pub fn spec(&self) -> VesselSpec {
@@ -259,10 +266,20 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
             }
         }
         // thrust transforms: the settled (end-of-test) pose when available -- after spawn the engine
-        // joint sags by 1e-6..2e-4 rad in a random direction (7 flights), constant thereafter
+        // joint sags by 1e-6..2e-4 rad in a random direction (7 flights), constant thereafter. A
+        // larger change means the end pose is a deformed joint (tip-over / crash): use the start.
+        let start: Vec<&str> = g.all("thrustTransform").collect();
         let tsrc: Vec<&str> = match wheels.and_then(|w| w.get(i)) {
-            Some(we) if we.get("thrustTransform").is_some() => we.all("thrustTransform").collect(),
-            _ => g.all("thrustTransform").collect(),
+            Some(we) if we.get("thrustTransform").is_some() => {
+                let end: Vec<&str> = we.all("thrustTransform").collect();
+                let settled = end.len() == start.len()
+                    && end.iter().zip(&start).all(|(a, b)| {
+                        let (fa, fb) = (mpos(&nums(&fields(a)["fwd"])).normalized(), mpos(&nums(&fields(b)["fwd"])).normalized());
+                        fa.dot(fb).clamp(-1.0, 1.0).acos() < 1e-3
+                    });
+                if settled { end } else { start }
+            }
+            _ => start,
         };
         for tt in tsrc {
             let f = fields(tt);
@@ -297,6 +314,79 @@ pub fn control(t: &Trace, i: usize) -> Control {
     }
 }
 
+/// Scenery translation in effect at row `i` (EnvState::ground_shift), measured from the trace:
+/// the logged PQS placement offset (`pqs_*`) when present, else the
+/// mean height of the logged WheelHit points above the sim ground at the nearest row with legs
+/// on the ground (forward first; origin shifts only happen while > 500 m away, so the landed
+/// rows carry the placement the touchdown sees). Zero when nothing is grounded.
+pub fn ground_shift_at(t: &Trace, i: usize) -> V3 {
+    t.gshift[i]
+}
+
+/// KSC placement offset of the session: ground probe (pad centre) minus the surveyed deck there,
+/// minus the radial part of the PQS translation (median over the logged rows).
+fn ksc_dz_from_probe(c: &Csv, gshift: &[V3]) -> f64 {
+    if !c.has("probe_alt") {
+        return 0.0;
+    }
+    let prm = sim::Params::default();
+    let p0 = crate::ksc::KSC_PAD_DECK_BODY_FIXED;
+    let up = p0.normalized();
+    let nominal = p0.norm() - prm.body.radius - sim::ground_height(&prm, p0);
+    let mut v: Vec<f64> = (0..c.n).map(|i| c.c("probe_alt")[i] - nominal - gshift[i].dot(up)).filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+fn ground_shift_series(c: &Csv) -> Vec<V3> {
+    let prm = sim::Params::default();
+    let up = crate::ksc::KSC_PAD_DECK_BODY_FIXED.normalized();
+    // SimHarness >= v7 logs the PQS transform's float-rounding offset from the double body
+    // position (body frame): the whole scenery is translated by exactly that vector (checked
+    // against the ground probe to 3e-5 m). The survey was taken at zero offset.
+    if c.has("pqs_x") {
+        return (0..c.n).map(|i| v3(c.c("pqs_x")[i], c.c("pqs_y")[i], c.c("pqs_z")[i])).collect();
+    }
+    let nw = (0..8).filter(|k| c.has(&format!("wc{k}_hx"))).count();
+    let cols: Vec<[&[f64]; 4]> = (0..nw)
+        .map(|k| [c.c(&format!("wc{k}_grounded")), c.c(&format!("wc{k}_hx")), c.c(&format!("wc{k}_hy")), c.c(&format!("wc{k}_hz"))])
+        .collect();
+    let at: Vec<Option<V3>> = (0..c.n)
+        .map(|j| {
+            let (mut s, mut n) = (0.0, 0);
+            for col in &cols {
+                if col[0][j] > 0.5 && col[1][j].is_finite() {
+                    s += sim::ground_height(&prm, v3(col[1][j], col[2][j], col[3][j]));
+                    n += 1;
+                }
+            }
+            (n > 0).then(|| up * (s / n as f64))
+        })
+        .collect();
+    // nearest grounded row forward, else backward, else zero
+    let mut out = vec![None; c.n];
+    let mut next = None;
+    for j in (0..c.n).rev() {
+        if at[j].is_some() {
+            next = at[j];
+        }
+        out[j] = next;
+    }
+    let mut prev = None;
+    out.iter()
+        .enumerate()
+        .map(|(j, o)| {
+            if at[j].is_some() {
+                prev = at[j];
+            }
+            o.or(prev).unwrap_or(V3::ZERO)
+        })
+        .collect()
+}
+
 /// Sim state equal to the logged state at tick `i` (needs i >= 10 for the smoother history).
 pub fn state_at(t: &Trace, spec: &VesselSpec, i: usize) -> EnvState {
     let c = &t.csv;
@@ -311,6 +401,8 @@ pub fn state_at(t: &Trace, spec: &VesselSpec, i: usize) -> EnvState {
         q,
         w: -c.v("w", i),
         toff: f32::NAN,
+        ground_shift: ground_shift_at(t, i),
+        ksc_dz: t.ksc_dz,
         ..Default::default()
     };
     st.res = [c.c("lf")[i], c.c("ox")[i], c.c("mono")[i], c.c("ec")[i]];

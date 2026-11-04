@@ -38,7 +38,11 @@ class LanderVecEnv:
 
     kwargs: substeps (0.02 s physics ticks per step, default 5), max_steps, alt_min, alt_max,
     radius, vdown_min, vdown_max, vh_max, tilt_max_deg, w_max, fuel_min, fuel_max, ut_max,
-    oob_radius, oob_alt, ground_alt, friction, sun_temperature, aero.
+    oob_radius, oob_alt, ground_alt, friction, sun_temperature, aero, ground_shift_max,
+    ksc_dz_max. The last two randomize the pad/terrain collider placement per episode the way
+    the game moves it (see DESIGN.md "Scenery placement"); they default to 0 (surveyed
+    placement). For training a lander that flies in the real game, use ground_shift_max=0.022,
+    ksc_dz_max=0.04.
     """
 
     single_observation_space = _OBS_SPACE

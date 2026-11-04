@@ -43,7 +43,7 @@ soa! {
     rw_in: V3, smooth_buf: [[f32; 3]; VEL_SMOOTH_LEN], smooth_idx: u8, vel_spiking: bool,
     last_vel_provisional: bool, last_vel: [f32; 3], last_vel_idx: u8, drift_frames: u8,
     status: u8, settled_ticks: u16, ticks: u32, impact_speed: f32, toff: f32,
-    legs: [crate::wheel::LegState; crate::vessel::MAX_LEGS],
+    legs: [crate::wheel::LegState; crate::vessel::MAX_LEGS], ground_shift: V3, ksc_dz: f64,
 }
 
 // Raw column pointers are only dereferenced at disjoint indices (one env per task).
@@ -80,6 +80,14 @@ pub struct TaskConfig {
     /// out-of-bounds: horizontal distance / height (m)
     pub oob_radius: f64,
     pub oob_alt: f64,
+    /// scenery placement jitter (see sim::Scenery, DESIGN.md "Scenery placement"), uniform per
+    /// episode, 0 = nominal surveyed placement (no extra RNG draw):
+    /// - ground_shift_max: all scenery along the pad normal in [-max, max] m (PQS re-rounding at
+    ///   the last FloatingOrigin shift; measured within +-0.022 m, sigma 0.009 m)
+    /// - ksc_dz_max: KSC colliders only, in [-max, max] m (per game session; measured 0 in 7 of 9
+    ///   game sessions, +0.037 and -0.013 m in the other two)
+    pub ground_shift_max: f64,
+    pub ksc_dz_max: f64,
 }
 
 impl Default for TaskConfig {
@@ -100,6 +108,8 @@ impl Default for TaskConfig {
             ut_max: 0.0,
             oob_radius: 3000.0,
             oob_alt: 5000.0,
+            ground_shift_max: 0.0,
+            ksc_dz_max: 0.0,
         }
     }
 }
@@ -148,6 +158,12 @@ pub fn sample_reset(spec: &VesselSpec, cfg: &TaskConfig, rng: &mut u64) -> EnvSt
     let full = spec.mass_props(&spec.full_resources()).1;
     let now = spec.mass_props(&st.res).1;
     st.x = st.x + st.q.rotate(full - now);
+    if cfg.ground_shift_max > 0.0 {
+        st.ground_shift = u * unif(rng, -cfg.ground_shift_max, cfg.ground_shift_max);
+    }
+    if cfg.ksc_dz_max > 0.0 {
+        st.ksc_dz = unif(rng, -cfg.ksc_dz_max, cfg.ksc_dz_max);
+    }
     st
 }
 
@@ -234,10 +250,10 @@ pub fn observe(spec: &VesselSpec, prm: &Params, st: &EnvState, mach: f32, qkpa: 
     let mut low = f64::INFINITY;
     for k in 0..spec.n_legs as usize {
         let p = st.x + st.q.rotate(spec.legs[k].foot());
-        low = low.min(sim::ground_height(prm, p));
+        low = low.min(sim::ground_height_sc(prm, &sim::Scenery { shift: st.ground_shift, ksc_dz: st.ksc_dz }, p));
     }
     if spec.n_legs == 0 {
-        low = sim::ground_height(prm, x_com);
+        low = sim::ground_height_sc(prm, &sim::Scenery { shift: st.ground_shift, ksc_dz: st.ksc_dz }, x_com);
     }
     let _ = ground_r;
     let fuel = if spec.res_cap_total[0] > 0.0 { st.res[0] / spec.res_cap_total[0] } else { 0.0 };

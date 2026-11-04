@@ -42,12 +42,22 @@ reset distribution, random actions. CPU reference: 14.1 M env-ticks/s at 65 536 
 | G2 | direct field-major global addressing (no local state copy) | 31.8 M / 35.9 M | 2.5x |
 | G3 | mass properties from a linear-in-resources basis; per-part aero in the root frame (one rotation in/out) | 36.3 M / 41.0 M | 2.9x |
 | G4 | mixed precision kernel (`precision="mixed"`, default): double where KSP keeps double (CoM position/velocity, gravity, altitude, resources, attitude accumulation), float where Unity/PhysX use float | 217 M / 235 M | 16.7x |
+| G5 | scenery placement state (ground shift + KSC offset, 4 more state fields, flag-aware terrain sampling) | 204 M / 214 M | 15.2x |
+| G6 | exact early-out above the highest ground point (176 m ASL) instead of a terrain lookup every tick | 264 M / 284 M | 20.1x |
+| G7 | mixed kernel: terrain queries in float in a local frame at the pad, heights relative to the origin height (exact expansion of the radius, no 600 km / 72 m magnitudes in float) | 246 M / 283 M | 20.1x |
+
+Near-ground start (2-30 m: leg rays, terrain, contact solve), mixed kernel, 65 536 / 1 048 576 envs:
+G5 43 M / 46 M ticks/s -> G7 137 M / 151 M ticks/s (3.3x; the f64 sphere-ground path was 125 M).
 
 Notes:
 - The 4060 Ti runs f64 at 1/64 of the f32 rate; register caps (64..168) and block sizes did not
   change G3's throughput, so it was f64-ALU bound. G4 is ~5.7x G3.
 - Ablation at G4 (262 144 envs): no aero 338 M, no ground 287 M, neither 455 M ticks/s.
-- Accuracy gate for G4 (tests/test_cuda_parity.py): every in-game trace row re-seeded as one env
+- CPU numbers were not re-measured after G5-G7: the guidance thread's Monte Carlo was using
+  ~19 of the 24 hardware threads (load 24-35), which roughly halves single-thread timings. The
+  CPU tick gained the same exact ground-ceiling early-out as G6.
+- Accuracy gate for G4-G7 (tests/test_cuda_parity.py): every in-game trace row re-seeded as one env
   and stepped once on the GPU; the one-step error against the game equals the CPU's to 3
-  significant figures (median and p95, airborne and in contact, 7 traces). Against the CPU: 5 ticks
-  <= 1.3e-6 m, 50 ticks <= 6e-6 m; the f64 kernel matches the CPU to 1e-9 m.
+  significant figures (median and p95, airborne and in contact, 10 traces). Against the CPU: 5 ticks
+  <= 1.3e-6 m, 50 ticks <= 6e-6 m (landings: 99% of envs <= 4e-6 m); the f64 kernel matches
+  the CPU to 1e-9 m.

@@ -97,8 +97,8 @@ __device__ float body_lift_curve32(const float* Pf, float x) {
 }
 
 // ---- terrain heightfield (double: world positions are ~600 km from the body centre) ----------
-struct Terrain { const double* meta; const float* alt; const unsigned char* gr; int ok; };
-__device__ bool grid_sample(const Terrain& T, int gi, double e, double n, double* out) {
+struct Terrain { const double* meta; const float* alt; const float* altr; const unsigned char* gr; int ok; };
+__device__ bool grid_sample(const Terrain& T, int gi, double e, double n, double kdz, double* out) {
     const double* g = T.meta + 15 + 4 * gi;
     double step = g[0], half = g[1]; int N = (int)g[2]; int off = (int)g[3];
     double fe = (e + half) / step, fn = (n + half) / step;
@@ -107,30 +107,32 @@ __device__ bool grid_sample(const Terrain& T, int gi, double e, double n, double
     if (ie + 1 >= N || in + 1 >= N) return false;
     double te = fe - ie, tn = fn - in;
     const float* a = T.alt + off;
-    double h00 = a[ie * N + in], h10 = a[(ie + 1) * N + in], h01 = a[ie * N + in + 1], h11 = a[(ie + 1) * N + in + 1];
+    const unsigned char* gf = T.gr + off;  // KSC cells (flag 0) raised by kdz
+    double h00 = a[ie * N + in] + (gf[ie * N + in] ? 0.0 : kdz), h10 = a[(ie + 1) * N + in] + (gf[(ie + 1) * N + in] ? 0.0 : kdz),
+           h01 = a[ie * N + in + 1] + (gf[ie * N + in + 1] ? 0.0 : kdz), h11 = a[(ie + 1) * N + in + 1] + (gf[(ie + 1) * N + in + 1] ? 0.0 : kdz);
     if (!(isfinite(h00) && isfinite(h10) && isfinite(h01) && isfinite(h11))) return false;
     *out = (h00 * (1.0 - te) + h10 * te) * (1.0 - tn) + (h01 * (1.0 - te) + h11 * te) * tn;
     return true;
 }
-__device__ double terrain_alt(const Terrain& T, D3 p) {
+__device__ double terrain_alt(const Terrain& T, D3 p, double kdz) {
     D3 o = d3(T.meta[0], T.meta[1], T.meta[2]), E = d3(T.meta[3], T.meta[4], T.meta[5]), N = d3(T.meta[6], T.meta[7], T.meta[8]);
     D3 d = p - o; double e = dotd(d, E), n = dotd(d, N);
     int ng = (int)T.meta[14];
-    for (int g = 0; g < ng; g++) { double h; if (grid_sample(T, g, e, n, &h)) return h; }
+    for (int g = 0; g < ng; g++) { double h; if (grid_sample(T, g, e, n, kdz, &h)) return h; }
     return T.meta[13];
 }
-__device__ double ground_height(const double* P, const Terrain& T, D3 p) {
-    if (T.ok) return normd(p) - T.meta[12] - terrain_alt(T, p);
-    return normd(p) - P[P_RADIUS] - P[P_GROUND_ALT];
+__device__ double ground_height(const double* P, const Terrain& T, D3 p, double kdz) {
+    if (T.ok) return normd(p) - T.meta[12] - terrain_alt(T, p, kdz);
+    return normd(p) - P[P_RADIUS] - P[P_GROUND_ALT] - kdz;
 }
-__device__ D3 ground_normal(const double* P, const Terrain& T, D3 p) {
+__device__ D3 ground_normal(const double* P, const Terrain& T, D3 p, double kdz) {
     if (!T.ok) return normalizedd(p);
     D3 r = normalizedd(p);
     D3 o = d3(T.meta[0], T.meta[1], T.meta[2]), E = d3(T.meta[3], T.meta[4], T.meta[5]), N = d3(T.meta[6], T.meta[7], T.meta[8]);
     D3 d = p - o; double e = dotd(d, E), n = dotd(d, N);
     double step = 1.0; int ng = (int)T.meta[14];
     for (int g = 0; g < ng; g++) { const double* gg = T.meta + 15 + 4 * g; if (fabs(e) < gg[1] - gg[0] && fabs(n) < gg[1] - gg[0]) { step = gg[0]; break; } }
-    double h1 = terrain_alt(T, p + E * step), h2 = terrain_alt(T, p - E * step), h3 = terrain_alt(T, p + N * step), h4 = terrain_alt(T, p - N * step);
+    double h1 = terrain_alt(T, p + E * step, kdz), h2 = terrain_alt(T, p - E * step, kdz), h3 = terrain_alt(T, p + N * step, kdz), h4 = terrain_alt(T, p - N * step, kdz);
     double dhde = (h1 - h2) / (2.0 * step), dhdn = (h3 - h4) / (2.0 * step);
     return normalizedd(r - E * dhde - N * dhdn);
 }
@@ -147,26 +149,103 @@ __device__ float ground_friction(const Terrain& T, D3 p) {
     return 0.9f;
 }
 // ray a - s u, s in [0, len]
-__device__ bool ground_ray(const double* P, const Terrain& T, D3 a, D3 u, double len, double* s_out, D3* p_out, D3* n_out) {
+__device__ bool ground_ray(const double* P, const Terrain& T, D3 a, D3 u, double len, double kdz, double* s_out, D3* p_out, D3* n_out) {
     double s = 0.0;
     if (T.ok) {
         for (int it = 0; it < 4; it++) {
             D3 p = a - u * s;
-            double rg = T.meta[12] + terrain_alt(T, p);
+            double rg = T.meta[12] + terrain_alt(T, p, kdz);
             double au = dotd(a, u);
             double disc = au * au - (dotd(a, a) - rg * rg);
             if (disc < 0.0) return false;
             s = au - sqrt(disc);
         }
     } else {
-        double rg = P[P_RADIUS] + P[P_GROUND_ALT];
+        double rg = P[P_RADIUS] + P[P_GROUND_ALT] + kdz;
         double au = dotd(a, u);
         double disc = au * au - (dotd(a, a) - rg * rg);
         if (disc < 0.0) return false;
         s = au - sqrt(disc);
     }
     if (s < 0.0 || s > len) return false;
-    *s_out = s; *p_out = a - u * s; *n_out = ground_normal(P, T, *p_out);
+    *s_out = s; *p_out = a - u * s; *n_out = ground_normal(P, T, *p_out, kdz);
+    return true;
+}
+
+// ---- terrain in float, local frame at the terrain origin o (the pad) --------------------------
+// Query points are d = p - o in float (|d| <= 1.5 km: ulp <= 1.2e-4 m, <= 4e-6 m on the fine pad
+// grid). Heights are relative to the origin's height h0 = |o| - R: the grid altitudes arrive as
+// talt_rel = talt - h0 (exact in float near the pad), and |o + d| - |o| = (2u + w/|o|) /
+// (sqrt(1 + eps) + 1), u = o_hat.d, w = |d|^2, eps = (2u + w/|o|)/|o|, so no float value near the
+// contact carries the 72 m (or 600 km) magnitude. Same algorithms as the double versions above
+// (bilinear grid, finite-difference normal, 4-step ray iteration); only rounding differs.
+struct LT { F3 oh, E, N; float inv_o, two_o; };
+__device__ __forceinline__ float lt_alt(const Terrain& T, const float* M, float e, float n, float kdz) {
+    int ng = (int)M[14];
+    for (int gi = 0; gi < ng; gi++) {
+        const float* g = M + 15 + 4 * gi;
+        float step = g[0], half = g[1]; int N = (int)g[2]; int off = (int)g[3];
+        float fe = (e + half) / step, fn = (n + half) / step;
+        if (fe < 0.f || fn < 0.f) continue;
+        int ie = (int)floorf(fe), in = (int)floorf(fn);
+        if (ie + 1 >= N || in + 1 >= N) continue;
+        float te = fe - ie, tn = fn - in;
+        const float* a = T.altr + off; const unsigned char* gf = T.gr + off;
+        float h00 = a[ie * N + in] + (gf[ie * N + in] ? 0.f : kdz), h10 = a[(ie + 1) * N + in] + (gf[(ie + 1) * N + in] ? 0.f : kdz),
+              h01 = a[ie * N + in + 1] + (gf[ie * N + in + 1] ? 0.f : kdz), h11 = a[(ie + 1) * N + in + 1] + (gf[(ie + 1) * N + in + 1] ? 0.f : kdz);
+        if (!(isfinite(h00) && isfinite(h10) && isfinite(h01) && isfinite(h11))) continue;
+        return (h00 * (1.f - te) + h10 * te) * (1.f - tn) + (h01 * (1.f - te) + h11 * te) * tn;
+    }
+    return M[13];
+}
+// |o + d| - |o|
+__device__ __forceinline__ float lt_rad(const LT& L, F3 d) {
+    float u = dot(L.oh, d), w = dot(d, d);
+    float num = 2.f * u + w * L.inv_o;
+    return num / (sqrtf(1.f + num * L.inv_o) + 1.f);
+}
+__device__ __forceinline__ float lt_height(const Terrain& T, const float* M, const LT& L, F3 d, float kdz) {
+    return lt_rad(L, d) - lt_alt(T, M, dot(d, L.E), dot(d, L.N), kdz);
+}
+__device__ F3 lt_normal(const Terrain& T, const float* M, const LT& L, F3 d, float kdz) {
+    F3 r = normalized(L.oh + d * L.inv_o);
+    float e = dot(d, L.E), n = dot(d, L.N);
+    float step = 1.f; int ng = (int)M[14];
+    for (int g = 0; g < ng; g++) { const float* gg = M + 15 + 4 * g; if (fabsf(e) < gg[1] - gg[0] && fabsf(n) < gg[1] - gg[0]) { step = gg[0]; break; } }
+    F3 dE = L.E * step, dN = L.N * step;
+    F3 p1 = d + dE, p2 = d - dE, p3 = d + dN, p4 = d - dN;
+    float h1 = lt_alt(T, M, dot(p1, L.E), dot(p1, L.N), kdz), h2 = lt_alt(T, M, dot(p2, L.E), dot(p2, L.N), kdz);
+    float h3 = lt_alt(T, M, dot(p3, L.E), dot(p3, L.N), kdz), h4 = lt_alt(T, M, dot(p4, L.E), dot(p4, L.N), kdz);
+    float dhde = (h1 - h2) / (2.f * step), dhdn = (h3 - h4) / (2.f * step);
+    return normalized(r - L.E * dhde - L.N * dhdn);
+}
+__device__ float lt_friction(const Terrain& T, const float* M, const LT& L, F3 d) {
+    float e = dot(d, L.E), n = dot(d, L.N);
+    int ng = (int)M[14];
+    for (int g = 0; g < ng; g++) {
+        const float* gg = M + 15 + 4 * g;
+        float fe = rintf((e + gg[1]) / gg[0]), fn = rintf((n + gg[1]) / gg[0]); int Nn = (int)gg[2];
+        if (fe >= 0.f && fn >= 0.f && (int)fe < Nn && (int)fn < Nn) return T.gr[(int)gg[3] + (int)fe * Nn + (int)fn] == 1 ? 0.9f : 0.6f;
+    }
+    return 0.9f;
+}
+// ray a - s u from local point da: the double ground_ray's iteration, s = k / (au + sqrt(au^2 - k))
+// with k = |a|^2 - rg^2 = (|a| - rg)(|a| + rg)
+__device__ bool lt_ray(const Terrain& T, const float* M, const LT& L, F3 da, F3 u, float len, float kdz, float* s_out, F3* d_out, F3* n_out) {
+    float ra = lt_rad(L, da);                       // |a| - |o|
+    float au = dot(normalized(L.oh + da * L.inv_o), u) * (L.two_o * 0.5f + ra);
+    if (au <= 0.f) return false;                     // s = au - sqrt(disc) < 0
+    float s = 0.f;
+    for (int it = 0; it < 4; it++) {
+        F3 d = da - u * s;
+        float alt = lt_alt(T, M, dot(d, L.E), dot(d, L.N), kdz);
+        float k = (ra - alt) * (L.two_o + ra + alt);  // (|a| - rg)(|a| + rg), alt relative to h0
+        float disc = au * au - k;
+        if (disc < 0.f) return false;
+        s = k / (au + sqrtf(disc));
+    }
+    if (s < 0.f || s > len) return false;
+    *s_out = s; *d_out = da - u * s; *n_out = lt_normal(T, M, L, *d_out, kdz);
     return true;
 }
 
@@ -205,13 +284,13 @@ __device__ __forceinline__ D3 rot_z(D3 p, double a) { double s = sin(a), c = cos
 // ---- the tick --------------------------------------------------------------------------------
 #define SV(f) state[(size_t)(f) * n + idx]
 #define PF3(base, i) f3(Pf[(base) + 3 * (i)], Pf[(base) + 3 * (i) + 1], Pf[(base) + 3 * (i) + 2])
-extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float* __restrict__ Pf, const double* __restrict__ tmeta,
-                                       const float* __restrict__ talt, const unsigned char* __restrict__ tgr, int tok,
+extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float* __restrict__ Pf, const double* __restrict__ tmeta, const float* __restrict__ tmf,
+                                       const float* __restrict__ talt, const float* __restrict__ taltr, const unsigned char* __restrict__ tgr, int tok,
                                        double* __restrict__ state, const float* __restrict__ act, int n, int substeps)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
-    Terrain T; T.meta = tmeta; T.alt = talt; T.gr = tgr; T.ok = tok;
+    Terrain T; T.meta = tmeta; T.alt = talt; T.altr = taltr; T.gr = tgr; T.ok = tok;
 
     const float throttle = fminf(fmaxf(act[4 * idx], 0.f), 1.f);
     const float pitch = fminf(fmaxf(act[4 * idx + 1], -1.f), 1.f);
@@ -446,10 +525,25 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
             force = force + qrot(qq, fl); torque = torque + qrot(qq, tl);
         }
         float ilinv[9]; inv3(il, ilinv);
-        // 6. ground contact
+        // 6. ground contact (scenery translated by the per-env ground shift: query at p - GS)
+        const D3 GS = d3(SV(S_GSHIFT), SV(S_GSHIFT + 1), SV(S_GSHIFT + 2));
+        const double KDZ = SV(S_KSCDZ);
+        const float kdzf = (float)KDZ;
+        // local terrain frame: dX = X - GS - o (double subtraction, then float)
+        LT Lt; F3 dX = f3(0, 0, 0);
+        if (T.ok) {
+            D3 o = d3(tmeta[0], tmeta[1], tmeta[2]);
+            double on = normd(o);
+            Lt.oh = ff(o * (1.0 / on)); Lt.E = f3(tmf[3], tmf[4], tmf[5]); Lt.N = f3(tmf[6], tmf[7], tmf[8]);
+            Lt.inv_o = (float)(1.0 / on); Lt.two_o = (float)(2.0 * on);
+            dX = ff(X - GS - o);
+        }
         int legs = 0; bool contact_any = false;
         F3 cr[MAX_HULL], cn[MAX_HULL]; float cgap[MAX_HULL], ctol[MAX_HULL], cbf[MAX_HULL], cmu[MAX_HULL]; int nc = 0;
-        bool near_ground = P[P_GROUND] != 0.0 && ground_height(P, T, X) < P[P_BOUND] + 10.0 + normd(v_com) * dt;
+        const double margin = P[P_BOUND] + 10.0 + normd(v_com) * dt;
+        // exact early-out above the highest ground point (sim::ground_ceiling)
+        const bool above_all = normd(X) - normd(GS) - fmax(KDZ, 0.0) - P[P_GROUND_CEIL] >= margin;
+        bool near_ground = P[P_GROUND] != 0.0 && !above_all && (T.ok ? (double)lt_height(T, tmf, Lt, dX, kdzf) : ground_height(P, T, X - GS, KDZ)) < margin;
         if (!near_ground) {
             for (int k = 0; k < nl; k++) { int lb = S_LEGS + k * LEG_FIELDS; SV(lb) = 0; SV(lb + 1) = 0; SV(lb + 2) = 0; SV(lb + 16) = 0; SV(lb + 17) = 0; }
         } else {
@@ -500,11 +594,18 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
                 // wheel collider ray (double world positions)
                 F3 ra = qrot(qq, PF3(P_LEG0 + k * LEG_STRIDE, 0));
                 F3 uf = qrot(qq, PF3(P_LEG0 + k * LEG_STRIDE, 1));
-                D3 a = X + dd(ra), u = dd(uf);
                 double len = Ls[10] + Ls[9];
-                double s_hit; D3 p, nnd;
-                if (ground_ray(P, T, a, u, len, &s_hit, &p, &nnd)) {
-                    F3 nn = ff(nnd);
+                double s_hit; F3 nn; bool hit;
+                if (T.ok) {
+                    float sf; F3 dl;
+                    hit = lt_ray(T, tmf, Lt, dX + ra, uf, (float)len, kdzf, &sf, &dl, &nn);
+                    s_hit = sf;
+                } else {
+                    D3 a = X + dd(ra), u = dd(uf), p, nnd;
+                    hit = ground_ray(P, T, a - GS, u, len, KDZ, &s_hit, &p, &nnd);
+                    nn = ff(nnd);
+                }
+                if (hit) {
                     F3 rel = ra - r_com - uf * (float)s_hit;  // p - x_com in float
                     float ndu = dot(nn, uf);
                     if (grounded) {
@@ -546,10 +647,13 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
             }
             for (int k = 0; k < nh; k++) {
                 F3 rh = qrot(qq, PF3(P_HULL, k));
+                F3 dh = dX + rh;
                 D3 p = X + dd(rh);
-                double gap = ground_height(P, T, p);
+                double gap = T.ok ? (double)lt_height(T, tmf, Lt, dh, kdzf) : ground_height(P, T, p - GS, KDZ);
                 if (gap < 0.01 && nc < MAX_HULL) {
-                    cr[nc] = rh - r_com; cn[nc] = ff(ground_normal(P, T, p)); cgap[nc] = (float)gap; ctol[nc] = Pf[P_HULLTOL + k]; cbf[nc] = Pf[P_HULLBF + k]; cmu[nc] = ground_friction(T, p);
+                    cr[nc] = rh - r_com; cgap[nc] = (float)gap; ctol[nc] = Pf[P_HULLTOL + k]; cbf[nc] = Pf[P_HULLBF + k];
+                    if (T.ok) { cn[nc] = lt_normal(T, tmf, Lt, dh, kdzf); cmu[nc] = lt_friction(T, tmf, Lt, dh); }
+                    else { cn[nc] = ff(ground_normal(P, T, p - GS, KDZ)); cmu[nc] = ground_friction(T, p - GS); }
                     nc++;
                 }
             }

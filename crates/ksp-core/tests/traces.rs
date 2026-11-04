@@ -118,9 +118,33 @@ fn drop_tests() {
 fn pad_landing() {
     check_flight("v6", "HopperPadLand", Bounds { accel_median: 5e-3, win1_pos_max: 0.1, win1_att_max_deg: 2.0 });
     check_touchdown("v6", "HopperPadLand", 0.05, 0.1);
+    // v7: SimHarness logs the scenery placement (PQS offset + ground probe), seeded exactly
+    check_flight("v7", "HopperPadLand", Bounds { accel_median: 5e-3, win1_pos_max: 0.1, win1_att_max_deg: 2.0 });
+    check_touchdown("v7", "HopperPadLand", 0.05, 0.1);
+}
+
+#[test]
+fn suicide_burn_v7() {
+    check_flight("v7", "HopperSuicide", Bounds { accel_median: 5e-3, win1_pos_max: 0.03, win1_att_max_deg: 0.3 });
+    check_touchdown("v7", "HopperSuicide", 0.02, 0.2);
 }
 
 #[test]
 fn suborbital_hop() {
     check_flight("v2", "HopperHop", Bounds { accel_median: 8e-3, win1_pos_max: 0.1, win1_att_max_deg: 1.5 });
+    check_flight("v7", "HopperHop", Bounds { accel_median: 8e-3, win1_pos_max: 0.1, win1_att_max_deg: 1.5 });
+}
+
+#[test]
+fn hop_terrain_landing_report() {
+    // landing on sloped PQS terrain 310 m from the pad; the craft tips over in game. Reported,
+    // loosely bounded (terrain off the pad is only known to ~1 cm, see VALIDATION.md)
+    let Some(t) = load("v7", "HopperHop") else { return };
+    let spec = t.spec();
+    let tds = touchdowns(&t, &spec, &Params { crash: false, ..Params::default() }, 25, 100);
+    for td in &tds {
+        eprintln!("v7/HopperHop: touchdown tick game {} sim {}, pos err at td {:.4} m, after 5 s {:.4} m", td.game_tick, td.sim_tick, td.pos_err_td, td.pos_err_end);
+    }
+    let td = tds.last().expect("touchdown");
+    assert!(td.pos_err_td < 0.02, "{}", td.pos_err_td);
 }

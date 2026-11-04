@@ -152,6 +152,8 @@ namespace SimHarness
             TimingManager.FixedUpdateAdd(TimingManager.TimingStage.BetterLateThanNever, act);
         }
 
+        bool probeSet;
+        Vector3d probeBF;
         bool partDied;
         float diedAt;
 
@@ -368,6 +370,8 @@ namespace SimHarness
             for (int k = 0; k < susp.Count; k++)
                 foreach (var n in new[] { "stw", "dtw", "ab", "set", "spring", "damper", "smg", "sc", "vp_k", "vp_c", "vp_rtk", "vp_rtc", "cd", "tf_x", "tf_y", "ltf_x", "ltf_y", "lv_x", "lv_y", "angv", "down", "etf_x", "etf_y", "grounded2" })
                     cols.Add("ws" + k + "_" + n);
+            // scenery placement probe (see OnTick)
+            cols.AddRange(new[] { "probe_alt", "pqs_x", "pqs_y", "pqs_z", "fo_x", "fo_y", "fo_z" });
             w.WriteLine(string.Join(",", cols));
         }
 
@@ -458,6 +462,25 @@ namespace SimHarness
                 a(GS(cs2, "contactDepth")); a(GS(cs2, "tireForce")); a(GS(cs2, "lastTireForce")); a(GS(cs2, "localWheelVelocity"));
                 a(GS(cs2, "angularVelocity")); a(GS(cs2, "downforce")); a(GS(cs2, "externalTireForce")); a(GS(cs2, "grounded"));
             }
+            // Scenery placement probe: a downward raycast from a fixed body-fixed point above the pad
+            // centre against the scenery layer, i.e. the deck height as the running game currently
+            // has it. FloatingOrigin.setOffset moves the bodies (double) and the PQS / KSC float
+            // transforms are rebuilt from them, so the collider surface can move by float rounding
+            // at ~600 km scale at every origin shift. Also logged: the PQS transform minus the
+            // double body position (body frame) and the current floating-origin offset.
+            if (!probeSet)
+            {
+                var site = PSystemSetup.Instance.GetSpaceCenterFacility("LaunchPad").GetSpawnPoint("LaunchPad");
+                probeBF = BF(b, (Vector3d)site.GetSpawnPointTransform().position - b.position);
+                probeSet = true;
+            }
+            Vector3d pw = b.position + b.BodyFrame.LocalToWorld(probeBF).xzy;
+            Vector3d puw = (pw - b.position).normalized;
+            RaycastHit ph;
+            bool pok = Physics.Raycast((Vector3)(pw + puw * 20.0), (Vector3)(-puw), out ph, 60f, 1 << 15);
+            a(pok ? H.R(((Vector3d)ph.point - b.position).magnitude - b.Radius) : "nan");
+            a(b.pqsController != null ? H.V(BF(b, (Vector3d)b.pqsController.transform.position - b.position)) : "nan,nan,nan");
+            a(H.V(BF(b, FloatingOrigin.Offset)));
             sb.Length -= 1;
             w.WriteLine(sb.ToString());
             tick++;

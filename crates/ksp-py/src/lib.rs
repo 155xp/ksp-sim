@@ -44,6 +44,8 @@ fn task_from_kwargs(kw: Option<&Bound<'_, PyDict>>) -> PyResult<(TaskConfig, Par
                 "ut_max" => c.ut_max = v.extract()?,
                 "oob_radius" => c.oob_radius = v.extract()?,
                 "oob_alt" => c.oob_alt = v.extract()?,
+                "ground_shift_max" => c.ground_shift_max = v.extract()?,
+                "ksc_dz_max" => c.ksc_dz_max = v.extract()?,
                 "ground_alt" => p.ground_alt = v.extract()?,
                 "friction" => p.friction = v.extract()?,
                 "sun_temperature" => p.sun_temperature = v.extract()?,

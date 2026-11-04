@@ -27,11 +27,13 @@ pub struct Terrain {
     pub up: V3,
     pub grids: Vec<Grid>,
     pub fallback_alt: f64,
+    /// highest ground altitude anywhere (grids and fallback): exact early-out for contact tests
+    pub max_alt: f64,
 }
 
 impl Grid {
     #[inline]
-    fn sample(&self, e: f64, n: f64) -> Option<f64> {
+    fn sample(&self, e: f64, n: f64, kdz: f64) -> Option<f64> {
         let fe = (e + self.half) / self.step;
         let fnn = (n + self.half) / self.step;
         if fe < 0.0 || fnn < 0.0 {
@@ -42,7 +44,8 @@ impl Grid {
             return None;
         }
         let (te, tn) = (fe - ie as f64, fnn - inn as f64);
-        let a = |i: usize, j: usize| self.alt[i * self.n + j] as f64;
+        // KSC colliders (ground flag 0) raised by kdz, PQS terrain cells unchanged
+        let a = |i: usize, j: usize| self.alt[i * self.n + j] as f64 + if self.ground[i * self.n + j] == 0 { kdz } else { 0.0 };
         let (h00, h10, h01, h11) = (a(ie, inn), a(ie + 1, inn), a(ie, inn + 1), a(ie + 1, inn + 1));
         if !(h00.is_finite() && h10.is_finite() && h01.is_finite() && h11.is_finite()) {
             return None;
@@ -55,10 +58,17 @@ impl Terrain {
     /// Ground altitude (m above the body radius) under body-fixed point `p`.
     #[inline]
     pub fn alt_at(&self, p: V3) -> f64 {
+        self.alt_at_k(p, 0.0)
+    }
+
+    /// As `alt_at` with the KSC colliders raised by `kdz` m (per-session KSC placement, see
+    /// sim::Scenery); PQS terrain cells keep their surveyed height.
+    #[inline]
+    pub fn alt_at_k(&self, p: V3, kdz: f64) -> f64 {
         let d = p - self.origin;
         let (e, n) = (d.dot(self.east), d.dot(self.north));
         for g in &self.grids {
-            if let Some(h) = g.sample(e, n) {
+            if let Some(h) = g.sample(e, n, kdz) {
                 return h;
             }
         }
@@ -83,16 +93,23 @@ impl Terrain {
     /// Height of `p` above the ground (negative = below).
     #[inline]
     pub fn height_above(&self, p: V3) -> f64 {
-        p.norm() - self.radius - self.alt_at(p)
+        self.height_above_k(p, 0.0)
+    }
+    #[inline]
+    pub fn height_above_k(&self, p: V3, kdz: f64) -> f64 {
+        p.norm() - self.radius - self.alt_at_k(p, kdz)
     }
 
     /// Outward surface normal at `p` (finite differences of the heightfield).
     pub fn normal_at(&self, p: V3) -> V3 {
+        self.normal_at_k(p, 0.0)
+    }
+    pub fn normal_at_k(&self, p: V3, kdz: f64) -> V3 {
         let r = p.normalized();
         let d = p - self.origin;
         let (e, n) = (d.dot(self.east), d.dot(self.north));
         let step = self.grids.iter().find(|g| e.abs() < g.half - g.step && n.abs() < g.half - g.step).map_or(1.0, |g| g.step);
-        let h = |de: f64, dn: f64| self.alt_at(p + self.east * de + self.north * dn);
+        let h = |de: f64, dn: f64| self.alt_at_k(p + self.east * de + self.north * dn, kdz);
         let dhde = (h(step, 0.0) - h(-step, 0.0)) / (2.0 * step);
         let dhdn = (h(0.0, step) - h(0.0, -step)) / (2.0 * step);
         (r - self.east * dhde - self.north * dhdn).normalized()
@@ -100,12 +117,15 @@ impl Terrain {
 
     /// Ray `a - s u` (s >= 0) against the ground: returns (s, hit point, normal) if s <= len.
     pub fn ray(&self, a: V3, u: V3, len: f64) -> Option<(f64, V3, V3)> {
+        self.ray_k(a, u, len, 0.0)
+    }
+    pub fn ray_k(&self, a: V3, u: V3, len: f64, kdz: f64) -> Option<(f64, V3, V3)> {
         // start from the hit with the sphere at the local ground altitude, then re-evaluate the
         // altitude at the hit point a few times (piecewise-linear ground)
         let mut s = 0.0;
         for _ in 0..4 {
             let p = a - u * s;
-            let rg = self.radius + self.alt_at(p);
+            let rg = self.radius + self.alt_at_k(p, kdz);
             let au = a.dot(u);
             let disc = au * au - (a.norm2() - rg * rg);
             if disc < 0.0 {
@@ -117,7 +137,7 @@ impl Terrain {
             return None;
         }
         let p = a - u * s;
-        Some((s, p, self.normal_at(p)))
+        Some((s, p, self.normal_at_k(p, kdz)))
     }
 
     pub fn load(bytes: &[u8]) -> Option<Terrain> {
@@ -156,6 +176,7 @@ impl Terrain {
             east: v3(v[3], v[4], v[5]),
             north: v3(v[6], v[7], v[8]),
             up: v3(v[9], v[10], v[11]),
+            max_alt: grids.iter().flat_map(|g| g.alt.iter()).filter(|a| a.is_finite()).fold(fallback_alt, |m, &a| m.max(a as f64)),
             grids,
             fallback_alt,
         })

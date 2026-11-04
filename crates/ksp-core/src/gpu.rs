@@ -38,8 +38,10 @@ pub mod st {
     pub const TOFF: usize = 76;
     pub const FRAME: usize = 77;
     pub const LEGS: usize = 78;
+    pub const GSHIFT: usize = LEGS + super::MAX_LEGS * super::LEG_FIELDS;
+    pub const KSCDZ: usize = GSHIFT + 3;
 }
-pub const STATE_FIELDS: usize = st::LEGS + MAX_LEGS * LEG_FIELDS;
+pub const STATE_FIELDS: usize = st::GSHIFT + 4;
 
 pub fn pack_state(s: &EnvState, out: &mut [f64]) {
     out[st::UT] = s.ut;
@@ -85,6 +87,8 @@ pub fn pack_state(s: &EnvState, out: &mut [f64]) {
             out[b + j] = *x as f64;
         }
     }
+    out[st::GSHIFT..st::GSHIFT + 3].copy_from_slice(&[s.ground_shift.x, s.ground_shift.y, s.ground_shift.z]);
+    out[st::KSCDZ] = s.ksc_dz;
 }
 
 pub fn unpack_state(a: &[f64]) -> EnvState {
@@ -132,6 +136,8 @@ pub fn unpack_state(a: &[f64]) -> EnvState {
             tire: [g(16), g(17)],
         };
     }
+    s.ground_shift = v3(a[st::GSHIFT], a[st::GSHIFT + 1], a[st::GSHIFT + 2]);
+    s.ksc_dz = a[st::KSCDZ];
     s
 }
 
@@ -172,7 +178,7 @@ pub fn pack(spec: &VesselSpec, prm: &Params) -> Pack {
     for (n, v) in [("UT", st::UT), ("X", st::X), ("V", st::V), ("Q", st::Q), ("W", st::W), ("RES", st::RES), ("THR", st::THR), ("GIMBAL", st::GIMBAL),
         ("FLAMEOUT", st::FLAMEOUT), ("RW", st::RW), ("SMOOTH", st::SMOOTH), ("SMOOTH_IDX", st::SMOOTH_IDX), ("SPIKING", st::SPIKING),
         ("PROVISIONAL", st::PROVISIONAL), ("LAST_VEL", st::LAST_VEL), ("LAST_VEL_IDX", st::LAST_VEL_IDX), ("DRIFT", st::DRIFT),
-        ("STATUS", st::STATUS), ("SETTLED", st::SETTLED), ("TICKS", st::TICKS), ("IMPACT", st::IMPACT), ("TOFF", st::TOFF), ("FRAME", st::FRAME), ("LEGS", st::LEGS)] {
+        ("STATUS", st::STATUS), ("SETTLED", st::SETTLED), ("TICKS", st::TICKS), ("IMPACT", st::IMPACT), ("TOFF", st::TOFF), ("FRAME", st::FRAME), ("LEGS", st::LEGS), ("GSHIFT", st::GSHIFT), ("KSCDZ", st::KSCDZ)] {
         writeln!(p.header, "#define S_{n} {v}").unwrap();
     }
     // world
@@ -291,6 +297,7 @@ pub fn pack(spec: &VesselSpec, prm: &Params) -> Pack {
     p.scalar("RWEC", s.rw_ec_rate);
     p.scalar("RWRESP", s.rw_response);
     p.scalar("BOUND", s.bound_radius);
+    p.scalar("GROUND_CEIL", crate::sim::ground_ceiling(prm));
     Pack { data: p.data, header: p.header }
 }
 

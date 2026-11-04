@@ -90,6 +90,13 @@ pub struct EnvState {
     /// cached GetAtmoThermalStats temperature offset (K); NaN = recompute
     pub toff: f32,
     pub legs: [LegState; MAX_LEGS],
+    /// Translation (body frame, m) of the scenery colliders from their nominal (surveyed)
+    /// placement. KSP rebuilds the PQS / KSC float transforms from the double body position at
+    /// every FloatingOrigin shift (vessel > 500 m from the origin), so the pad surface moves by
+    /// float rounding at ~600 km scale; see Scenery and DESIGN.md "Scenery placement".
+    pub ground_shift: V3,
+    /// per-session radial offset of the KSC colliders (m, see Scenery)
+    pub ksc_dz: f64,
 }
 
 /// Pilot input, as `FlightCtrlState` (mainThrottle, pitch, yaw, roll) in [0,1] / [-1,1].
@@ -135,15 +142,35 @@ impl Default for Params {
     }
 }
 
+/// Placement of the scenery colliders relative to the surveyed ground (see DESIGN.md "Scenery
+/// placement"). KSP builds the PQS / KSC float transforms from double body positions:
+/// - `shift`: translation of all scenery (PQS terrain and KSC) by the PQS transform's rounding
+///   error, re-rounded at every FloatingOrigin shift (each tick while radar altitude > ~150 m);
+///   radial part sigma 9 mm, within +-2.2 cm (2589 in-game samples).
+/// - `ksc_dz`: extra radial offset of the KSC colliders (pad, apron, buildings) fixed per game
+///   session (scene load): 0 in 7 of 9 measured sessions, +0.037 m and -0.013 m in the others.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Scenery {
+    pub shift: V3,
+    pub ksc_dz: f64,
+}
+
 /// Ground ray `a - s u`, s in [0, len]: (s, hit point, outward normal).
 #[inline]
 pub fn ground_ray(prm: &Params, a: V3, u: V3, len: f64) -> Option<(f64, V3, V3)> {
+    ground_ray_sc(prm, &Scenery::default(), a, u, len)
+}
+
+/// Ground ray against the scenery as placed by `sc`.
+#[inline]
+pub fn ground_ray_sc(prm: &Params, sc: &Scenery, a: V3, u: V3, len: f64) -> Option<(f64, V3, V3)> {
+    let a = a - sc.shift;
     if prm.terrain {
         if let Some(t) = crate::terrain::ksc() {
-            return t.ray(a, u, len);
+            return t.ray_k(a, u, len, sc.ksc_dz).map(|(s, p, n)| (s, p + sc.shift, n));
         }
     }
-    let rg = prm.body.radius + prm.ground_alt;
+    let rg = prm.body.radius + prm.ground_alt + sc.ksc_dz;
     let au = a.dot(u);
     let disc = au * au - (a.norm2() - rg * rg);
     if disc < 0.0 {
@@ -154,18 +181,36 @@ pub fn ground_ray(prm: &Params, a: V3, u: V3, len: f64) -> Option<(f64, V3, V3)>
         return None;
     }
     let p = a - u * s;
-    Some((s, p, p.normalized()))
+    Some((s, p + sc.shift, p.normalized()))
+}
+
+/// Distance from the body centre above which no ground exists (any scenery placement within
+/// |shift| and ksc_dz <= 0 is added by the caller): early-out for contact tests.
+#[inline]
+pub fn ground_ceiling(prm: &Params) -> f64 {
+    if prm.terrain {
+        if let Some(t) = crate::terrain::ksc() {
+            return t.radius + t.max_alt;
+        }
+    }
+    prm.body.radius + prm.ground_alt
 }
 
 /// Height of body-fixed point `p` above the ground (negative = below).
 #[inline]
 pub fn ground_height(prm: &Params, p: V3) -> f64 {
+    ground_height_sc(prm, &Scenery::default(), p)
+}
+
+#[inline]
+pub fn ground_height_sc(prm: &Params, sc: &Scenery, p: V3) -> f64 {
+    let p = p - sc.shift;
     if prm.terrain {
         if let Some(t) = crate::terrain::ksc() {
-            return t.height_above(p);
+            return t.height_above_k(p, sc.ksc_dz);
         }
     }
-    p.norm() - prm.body.radius - prm.ground_alt
+    p.norm() - prm.body.radius - prm.ground_alt - sc.ksc_dz
 }
 
 #[inline(always)]
@@ -322,8 +367,14 @@ pub fn ground_friction(prm: &Params, p: V3) -> f64 {
 /// Outward ground normal at body-fixed point `p`.
 #[inline]
 pub fn ground_normal(prm: &Params, p: V3) -> V3 {
+    ground_normal_sc(prm, &Scenery::default(), p)
+}
+
+#[inline]
+pub fn ground_normal_sc(prm: &Params, sc: &Scenery, p: V3) -> V3 {
+    let p = p - sc.shift;
     match (prm.terrain, crate::terrain::ksc()) {
-        (true, Some(t)) => t.normal_at(p),
+        (true, Some(t)) => t.normal_at_k(p, sc.ksc_dz),
         _ => p.normalized(),
     }
 }
@@ -556,7 +607,11 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     let mut nc = 0usize;
     // exact early-out: every contact point lies within bound_radius of the root origin, and the
     // surveyed relief within that radius is < 5 m, so nothing can touch when the root is higher
-    let near_ground = prm.ground && rot_frame && ground_height(prm, st.x) < spec.bound_radius + 10.0 + v_com.norm() * dt;
+    let sc = Scenery { shift: st.ground_shift, ksc_dz: st.ksc_dz };
+    let margin = spec.bound_radius + 10.0 + v_com.norm() * dt;
+    // exact early-out: above the highest ground point (plus any scenery offset) nothing is near
+    let above_all = st.x.norm() - sc.shift.norm() - sc.ksc_dz.max(0.0) - ground_ceiling(prm) >= margin;
+    let near_ground = prm.ground && rot_frame && !above_all && ground_height_sc(prm, &sc, st.x) < margin;
     if !near_ground {
         for ls in st.legs[..spec.n_legs as usize].iter_mut() {
             ls.grounded = false;
@@ -586,7 +641,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
             let a = st.x + st.q.rotate(l.anchor);
             let u = st.q.rotate(l.up);
             let len = l.travel + l.radius;
-            if let Some((s_hit, p, n)) = ground_ray(prm, a, u, len) {
+            if let Some((s_hit, p, n)) = ground_ray_sc(prm, &sc, a, u, len) {
                 let ndu = n.dot(u);
                 // VPP tire force from the previous step's load, at the current contact
                 if ls.grounded {
@@ -637,9 +692,9 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         let reach = 0.01;
         for k in 0..spec.n_hull as usize {
             let p = st.x + st.q.rotate(spec.hull[k]);
-            let gap = ground_height(prm, p);
+            let gap = ground_height_sc(prm, &sc, p);
             if gap < reach && nc < MAX_CONTACTS {
-                contacts[nc] = Contact { r: p - x_com, n: ground_normal(prm, p), gap, crash_tol: spec.hull_tolerance[k], break_force: spec.hull_break_force[k], mu: ground_friction(prm, p) };
+                contacts[nc] = Contact { r: p - x_com, n: ground_normal_sc(prm, &sc, p), gap, crash_tol: spec.hull_tolerance[k], break_force: spec.hull_break_force[k], mu: ground_friction(prm, p - sc.shift) };
                 nc += 1;
             }
         }

@@ -52,6 +52,14 @@ class GpuTick:
         else:
             m, a, g = terr
             self.tmeta, self.talt, self.tgr, self.tok = cp.asarray(m), cp.asarray(a), cp.asarray(g), 1
+        # float copies for the mixed kernel's local-frame terrain: altitudes (and the fallback)
+        # relative to the terrain origin's height h0 = |o| - R
+        h0 = float(np.linalg.norm(cp.asnumpy(self.tmeta[:3])) - float(self.tmeta[12])) if self.tok else 0.0
+        self.taltr = (self.talt.astype(cp.float64) - h0).astype(cp.float32)
+        tm = self.tmeta.copy()
+        if self.tok:
+            tm[13] -= h0
+        self.tmf = tm.astype(cp.float32)
         self.block = block
         self.state = cp.asarray(np.ascontiguousarray(states.T))  # field-major [field][env]
 
@@ -63,8 +71,9 @@ class GpuTick:
         cp = self.cp
         a = cp.asarray(actions, dtype=cp.float32).reshape(self.n, 4)
         grid = ((self.n + self.block - 1) // self.block,)
-        p = (self.P,) if self.precision == "f64" else (self.P, self.Pf)
-        self.kernel(grid, (self.block,), p + (self.tmeta, self.talt, self.tgr, np.int32(self.tok), self.state, a,
+        p = (self.P, self.tmeta) if self.precision == "f64" else (self.P, self.Pf, self.tmeta, self.tmf)
+        t = (self.talt,) if self.precision == "f64" else (self.talt, self.taltr)
+        self.kernel(grid, (self.block,), p + t + (self.tgr, np.int32(self.tok), self.state, a,
                                               np.int32(self.n), np.int32(substeps)))
 
     def states(self) -> np.ndarray:

@@ -67,10 +67,10 @@ from pathlib import Path
 from ksp_sim._ksp_sim import cpu_step_packed, gpu_reset_states
 
 
-def _step_both(prec, n, seed, launches):
+def _step_both(prec, n, seed, launches, **task):
     from ksp_sim.cuda_full import GpuTick
 
-    s0 = gpu_reset_states(n, seed)
+    s0 = gpu_reset_states(n, seed, **task)
     rng = np.random.default_rng(seed)
     act = np.c_[rng.uniform(0.2, 0.9, n), rng.uniform(-0.3, 0.3, (n, 3))].astype(np.float32)
     g = GpuTick(s0, precision=prec)
@@ -82,18 +82,27 @@ def _step_both(prec, n, seed, launches):
     return np.linalg.norm(sg[:, 1:4] - sc[:, 1:4], axis=1), np.linalg.norm(sg[:, 4:7] - sc[:, 4:7], axis=1)
 
 
-@pytest.mark.parametrize("prec, tol5, tol50", [("f64", (1e-8, 1e-7), (1e-6, 1e-6)), ("mixed", (1e-5, 1e-5), (1e-4, 2e-4))])
-def test_full_tick_matches_cpu(prec, tol5, tol50):
+@pytest.mark.parametrize("prec, tol5, tol50, tol_land", [("f64", (1e-8, 1e-7), (1e-6, 1e-6), (1e-6, 1e-6)),
+                                                          ("mixed", (1e-5, 1e-5), (1e-4, 2e-4), (1e-4, 2e-4))])
+def test_full_tick_matches_cpu(prec, tol5, tol50, tol_land):
     # reset distribution (hover / landing starts incl. leg contact), 5 and 50 ticks
-    for launches, (tp, tv) in ((1, tol5), (10, tol50)):
-        dx, dv = _step_both(prec, 512, 3, launches)
-        print(f"{prec}: {5 * launches} ticks, GPU vs CPU pos max {dx.max():.2e} m, vel max {dv.max():.2e} m/s")
-        assert dx.max() < tp and dv.max() < tv
+    # third case: low starts with the scenery-placement jitter, so legs touch shifted ground
+    # (float rounding is amplified through the touchdown impacts in the mixed kernel; its
+    # accuracy against the game is checked by test_full_tick_vs_game_traces)
+    for launches, (tp, tv), task in ((1, tol5, {}), (10, tol50, {}), (10, tol_land, dict(alt_min=4.0, alt_max=6.0, vdown_min=0.5, vdown_max=2.0, ground_shift_max=0.02, ksc_dz_max=0.04))):
+        dx, dv = _step_both(prec, 512, 3, launches, **task)
+        print(f"{prec}: {5 * launches} ticks, GPU vs CPU pos max {dx.max():.2e} m (p99 {np.percentile(dx, 99):.2e}), vel max {dv.max():.2e} m/s")
+        if task:
+            # landings: a contact on a steep heightfield cell edge (KSC buildings, coarse grid)
+            # can bifurcate on rounding; require 99% of envs within the bound
+            assert np.percentile(dx, 99) < tp and np.percentile(dv, 99) < tv
+        else:
+            assert dx.max() < tp and dv.max() < tv
 
 
 _TRACES = Path(os.environ.get("KSP_SIM_TRACES", Path(__file__).resolve().parents[1] / "data" / "traces"))
 _TRACE_CASES = [("v2", "Ascent80"), ("v2", "HopperHover"), ("v2", "HopperSuicide"), ("v2", "HopperDrop2"), ("v2", "HopperHop"),
-                ("v3", "HopperSuicide"), ("v6", "HopperPadLand")]
+                ("v3", "HopperSuicide"), ("v6", "HopperPadLand"), ("v7", "HopperPadLand"), ("v7", "HopperSuicide"), ("v7", "HopperHop")]
 
 
 @pytest.mark.parametrize("prec", ["f64", "mixed"])
