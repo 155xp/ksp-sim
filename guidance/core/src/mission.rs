@@ -607,16 +607,22 @@ impl Flight {
         self.hold_h
     }
 
-    /// Height of the constant-rate final segment: 1.5 s plus the time this craft needs to swing
-    /// 10 degrees at hover throttle (wheels + gimbal), so it can still null drift there.
+    /// Time this craft needs to swing 10 degrees (rest to rest) at throttle `u`, from its wheels
+    /// and gimbal torque and its current inertia.
+    fn swing_time(&self, n: &Nav, u: f64) -> f64 {
+        let e = effectiveness(self.spec(), &self.st, n, u);
+        let ixx = n.inertia_l[0][0].max(n.inertia_l[2][2]).max(1e-9);
+        let alpha = capacity(&e.b, v3(1.0, 0.0, 0.0)).min(capacity(&e.b, v3(0.0, 0.0, 1.0))) / ixx;
+        (2.0 * (2.0 * 10f64.to_radians() / alpha.max(1e-6)).sqrt()).min(6.0)
+    }
+
+    /// Height of the constant-rate final segment: 1.5 s plus one 10 degree swing at hover
+    /// throttle, so the craft can still null drift there.
     fn update_hold_height(&mut self, n: &Nav) {
         let pr = propulsion(self.spec(), p_atm(n.alt));
         let u_h = (n.m * 9.81 / pr.thrust.max(1e-9)).clamp(0.05, 1.0);
-        let e = effectiveness(self.spec(), &self.st, n, u_h);
-        let ixx = n.inertia_l[0][0].min(n.inertia_l[2][2]).max(1e-9);
-        let alpha = capacity(&e.b, v3(1.0, 0.0, 0.0)).min(capacity(&e.b, v3(0.0, 0.0, 1.0))) / ixx;
-        let t_settle = 2.0 * (2.0 * 10f64.to_radians() / alpha.max(1e-6)).sqrt();
-        self.t_settle = t_settle.min(6.0);
+        let t_settle = self.swing_time(n, u_h);
+        self.t_settle = t_settle;
         self.hold_h = self.cfg.v_td.max(0.5) * (1.5 + t_settle).clamp(1.5, 8.0);
     }
 
@@ -675,17 +681,19 @@ impl Flight {
             // final metres: hold the touchdown rate (drag is negligible here)
             -grav.z + 3.0 * (-v_td - v.z)
         };
-        // horizontal: ZEM/ZEV to rest over the pad, timed to finish before the hold segment (by the
-        // hold time plus two attitude swings of this craft); once that time is used up, aim for
-        // rest one second before touchdown, and if the tilt limit can't deliver that, kill the
-        // drift first (touchdown speed matters more than the last metre of position)
+        // horizontal: ZEM/ZEV to rest over the pad, timed to finish before the hold segment plus
+        // one attitude swing of this craft. Its effective time to go never drops below
+        // ~5 swing times: ZEM/ZEV is a PD with gains 6/t^2, 4/t, and an outer loop faster than the
+        // attitude loop that realises it would just oscillate. In the hold, saturating the
+        // footprint tilt limit, the drift is killed first (touchdown speed matters more than the
+        // last metre of position).
         let t_td = if r.z > hh { st.t_go } else { r.z.max(0.0) / v_td.max(0.1) };
-        let tail = TAIL_S.max(hh / v_td.max(0.1) + 2.0 * self.t_settle);
-        let early = t_td - tail > 1.0;
-        let t_h = if early { t_td - tail } else { (t_td - 1.0).max(0.5) };
+        let t_sw = if r.z > hh { self.swing_time(n, st.u.clamp(0.05, 1.0)) } else { self.t_settle };
+        let t_min = (3.0 * t_sw).max(1.0);
+        let t_h = (t_td - hh / v_td.max(0.1) - self.t_settle).max(t_min);
         let zem = v3(-6.0 * r.x / (t_h * t_h) - 4.0 * v.x / t_h, -6.0 * r.y / (t_h * t_h) - 4.0 * v.y / t_h, 0.0);
         let lim = self.tilt_limit(n).tan() * az.max(0.0);
-        let mut ah = if early || (zem.x * zem.x + zem.y * zem.y).sqrt() <= lim { zem } else { v3(-v.x, -v.y, 0.0) * (1.0 / 0.8) };
+        let mut ah = if r.z > hh || (zem.x * zem.x + zem.y * zem.y).sqrt() <= lim { zem } else { v3(-v.x, -v.y, 0.0) * (1.0 / (2.0 * self.t_settle).max(0.8)) };
         ah.x -= grav.x;
         ah.y -= grav.y;
         v3(ah.x, ah.y, az)
@@ -872,7 +880,11 @@ impl Flight {
                     let thr = (dvn * n.m / (pr.thrust * tau_end)).clamp(0.0, 1.0);
                     self.cmd_thr = if err < 20f64.to_radians() { thr.max(pr.throttle_min) } else { 0.05 };
                     let (p_left, _) = propellant(self.spec(), &self.st.res);
-                    if dvn < 0.25 || p_left <= 1e-6 || self.bb_fail > 25 {
+                    // done: residual below 0.25 m/s, or a small residual (1 % of the plan, >= 1 m/s)
+                    // that points off the thrust axis (chasing it would mean another flip; the
+                    // descent steering and landing divert take it)
+                    let small = dvn < (0.01 * self.stats.bb_dv_plan).max(1.0);
+                    if dvn < 0.25 || (small && err > 20f64.to_radians()) || p_left <= 1e-6 || self.bb_fail > 25 {
                         let m_sep = self.stats.sep_mass;
                         let ve = propulsion(self.spec(), 0.0).isp * ENGINE_G0;
                         self.stats.bb_dv_used = ve * (m_sep / n.m).ln();
@@ -882,6 +894,9 @@ impl Flight {
                         self.cmd_thr = 0.0;
                         self.set_phase(Phase::Coast);
                     }
+                }
+                if debug() && self.st.ticks % 25 == 0 {
+                    eprintln!("  BB phase {:?} t {:.1} alt {:.0} dv_rem {:.1} err_ang {:.1} thr {:.2} fail {}", self.phase, self.st.ut - self.disp.ut, n.alt, self.bb_dv.norm(), err.to_degrees(), self.cmd_thr, self.bb_fail);
                 }
                 // decrement the remaining dv by what this tick's thrust will deliver
                 if self.phase == Phase::Boostback && self.cmd_thr > 0.0 {
