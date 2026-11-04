@@ -49,6 +49,22 @@ impl LandingBurnModel {
     }
 }
 
+/// The swing from the current attitude to engine-first (e.g. nose-first after a boostback),
+/// simulated as the attitude controller flies it: braking-curve rate command from the craft's
+/// reaction-wheel capacity, rate loop, aero moment from the large-angle tables. While it lasts
+/// the trajectory sees the drag and side force of the real angle of attack.
+#[derive(Clone, Copy, Debug)]
+pub struct Flip {
+    /// angle between the thrust axis and -v now (rad) and its rate (rad/s, + = growing)
+    pub alpha0: f64,
+    pub rate0: f64,
+    /// body-fixed direction the axis is tilted toward (perpendicular to v now)
+    pub tilt: V3,
+    /// control torque capacity about the swing axis (kN m) and the inertia about it (t m^2)
+    pub cap: f64,
+    pub inertia: f64,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PredOpts {
     /// angle-of-attack command as a horizontal ENU tilt vector (east, north): the thrust axis
@@ -68,6 +84,8 @@ pub struct PredOpts {
     /// aero torque (kN m) the craft can hold against: the commanded angle of attack is clipped
     /// along the path to where |moment| <= this (0 = no limit)
     pub aoa_torque: f64,
+    /// model the swing to engine-first first (the AoA command applies once it is done)
+    pub flip: Option<Flip>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -104,7 +122,7 @@ fn ground_r() -> f64 {
 /// Acceleration (m/s^2) and mass rate for point-mass state `s` with landing-burn throttle `u`
 /// along `bdir`, or extra thrust `f_ext` (kN).
 #[inline]
-fn deriv(c: &PredCraft, o: &PredOpts, pad: &Pad, s: &S, u: f64, bdir: V3, f_ext: V3, mdot_ext: f64) -> (V3, f64, f64) {
+fn deriv(c: &PredCraft, o: &PredOpts, pad: &Pad, s: &S, u: f64, bdir: V3, f_ext: V3, mdot_ext: f64, swing: Option<(f64, V3)>) -> (V3, f64, f64) {
     let r2 = s.x.norm2();
     let r = r2.sqrt();
     let alt = r - KERBIN.radius;
@@ -117,6 +135,14 @@ fn deriv(c: &PredCraft, o: &PredOpts, pad: &Pad, s: &S, u: f64, bdir: V3, f_ext:
         if atm.rho > 0.0 {
             q_kpa = atm.q_kpa;
             let vh = s.v / spd;
+            if let Some((alpha, tilt)) = swing {
+                // mid-swing: drag and side force at the real (large) angle of attack
+                let ad = alpha.to_degrees();
+                let tp = (tilt - vh * tilt.dot(vh)).normalized();
+                let mut f = vh * (-(atm.q_kpa * c.tables.big_cd(atm.mach, ad) * atm.pseudo_re_drag_mult));
+                f += tp * (atm.q_kpa * c.tables.big_cl(atm.mach, ad));
+                return (a + f / s.m + if f_ext.norm2() > 0.0 { f_ext / s.m } else { V3::ZERO }, -mdot_ext * f64::from(f_ext.norm2() > 0.0), atm.q_kpa);
+            }
             let (ae, an) = o.aoa;
             let lam = (ae * ae + an * an).sqrt();
             let mut amag = if u > 0.0 { 0.0 } else { lam };
@@ -215,7 +241,8 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
     };
     if o.sim_offset {
         let fe = if o.burn_time > 0.0 { o.thrust } else { V3::ZERO };
-        let (a0, _, _) = deriv(c, o, &pad, &s, 0.0, V3::ZERO, fe, 0.0);
+        let sw0 = o.flip.map(|f| (f.alpha0, f.tilt)).filter(|(a, _)| *a > 0.02);
+        let (a0, _, _) = deriv(c, o, &pad, &s, 0.0, V3::ZERO, fe, 0.0, sw0);
         s.v += a0 * (0.5 * FIXED_DT);
     }
     let mut res = PredResult::default();
@@ -223,6 +250,8 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
     let mut ignited = false;
     let max_t = if o.max_time > 0.0 { o.max_time } else { 3000.0 };
     let mut h = height(c, s.x);
+    // swing state (angle of attack, its rate)
+    let mut sw = o.flip.map(|f| (f.alpha0, f.rate0));
     while t < max_t {
         let r = s.x.norm();
         let alt = r - KERBIN.radius;
@@ -261,7 +290,14 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
         let fe = if o.burn_time > 0.0 && t < o.burn_time { o.thrust } else { V3::ZERO };
         let md = if fe.norm2() > 0.0 { mdot_ext } else { 0.0 };
         // RK4
-        let f = |st: &S| deriv(c, o, &pad, st, u, bdir, fe, md);
+        if sw.is_some() {
+            dt = dt.min(0.25);
+        }
+        let swing = match (sw, o.flip) {
+            (Some((al, _)), Some(fl)) if al > 0.02 => Some((al, fl.tilt)),
+            _ => None,
+        };
+        let f = |st: &S| deriv(c, o, &pad, st, u, bdir, fe, md, swing);
         let (a1, m1, q1) = f(&s);
         let s2 = S { x: s.x + s.v * (0.5 * dt), v: s.v + a1 * (0.5 * dt), m: s.m + m1 * 0.5 * dt };
         let (a2, m2, _) = f(&s2);
@@ -272,6 +308,25 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
         let nx = s.x + (s.v + s2.v * 2.0 + s3.v * 2.0 + s4.v) * (dt / 6.0);
         let nv = s.v + (a1 + a2 * 2.0 + a3 * 2.0 + a4) * (dt / 6.0);
         let nm = (s.m + (m1 + 2.0 * m2 + 2.0 * m3 + m4) * (dt / 6.0)).max(c.m_dry.min(s.m));
+        // advance the swing (as attitude.rs flies it), 0.02 s sub-steps
+        if let (Some((mut al, mut w)), Some(fl)) = (sw, o.flip) {
+            let alt_s = s.x.norm() - KERBIN.radius;
+            let atm = atm_at(alt_s, s.v.norm(), c.toff);
+            let q = if alt_s < KERBIN.atmosphere_depth { atm.q_kpa } else { 0.0 };
+            let i = fl.inertia.max(1e-9);
+            let nsub = (dt / 0.02).ceil().max(1.0) as usize;
+            let h_ = dt / nsub as f64;
+            for _ in 0..nsub {
+                let tau_a = c.tables.big_cm(atm.mach, al.to_degrees()) * q;
+                let a_b = (crate::attitude::BRAKE_FRACTION * (fl.cap - tau_a.abs()) / i).max(0.05 * fl.cap / i).max(1e-6);
+                let tb = crate::attitude::POINT_TAU;
+                let w_des = -(a_b * tb * ((1.0 + 2.0 * al / (a_b * tb * tb)).sqrt() - 1.0)).min(crate::attitude::MAX_RATE);
+                let tau_c = (i * (w_des - w) / crate::attitude::RATE_TAU - tau_a).clamp(-fl.cap, fl.cap);
+                w += (tau_c + tau_a) / i * h_;
+                al = (al + w * h_).clamp(0.0, std::f64::consts::PI);
+            }
+            sw = if al < 0.02 && w.abs() < 0.05 { None } else { Some((al, w)) };
+        }
         res.max_q = res.max_q.max(q1);
         res.apo = res.apo.max(alt);
         let nh = height(c, nx);

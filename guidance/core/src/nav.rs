@@ -208,7 +208,15 @@ pub struct AeroTables {
     pub cm: Vec<f64>,
     /// axial drag at zero angle of attack on a fine mach grid (the transonic rise is steep)
     pub cd0: Vec<f64>,
+    /// roll-averaged drag / side force / moment for any angle of attack 0..180 deg (BIG_ALPHA_STEP
+    /// grid, same mach grid): the swing from nose-first to engine-first after a boostback
+    pub big_cd: Vec<f64>,
+    pub big_cl: Vec<f64>,
+    pub big_cm: Vec<f64>,
 }
+
+pub const BIG_ALPHA_STEP: f64 = 5.0;
+const N_BIG: usize = 37;
 
 pub const CD0_MACH_STEP: f64 = 0.005;
 pub const TABLE_MACH_MAX: f64 = 12.0;
@@ -232,7 +240,36 @@ impl AeroTables {
         let n_mach = (TABLE_MACH_MAX / mach_step) as usize + 1;
         let n_alpha = (TABLE_ALPHA_MAX_DEG / alpha_step_deg) as usize + 1;
         let sz = n_mach * n_alpha * N_PHI;
-        let mut t = AeroTables { mach_step, alpha_step_deg, n_mach, n_alpha, n_phi: N_PHI, cd: vec![0.0; sz], cl: vec![0.0; sz], cs: vec![0.0; sz], cm: vec![0.0; sz], cd0: vec![] };
+        let mut t = AeroTables { mach_step, alpha_step_deg, n_mach, n_alpha, n_phi: N_PHI, cd: vec![0.0; sz], cl: vec![0.0; sz], cs: vec![0.0; sz], cm: vec![0.0; sz], cd0: vec![], big_cd: vec![0.0; n_mach * N_BIG], big_cl: vec![0.0; n_mach * N_BIG], big_cm: vec![0.0; n_mach * N_BIG] };
+        for im in 0..n_mach {
+            let mach = (im as f64 * mach_step).max(1e-3);
+            let spd = mach * 300.0;
+            let q_kpa = 0.0005 * spd * spd;
+            let atm = AtmState { p_kpa: 50.0, t: 250.0, rho: 1.0, c: 300.0, mach, q_kpa, pseudo_re_drag_mult: 1.0 };
+            for ia in 0..N_BIG {
+                let a = ia as f64 * BIG_ALPHA_STEP;
+                let (mut cd, mut cl, mut cm) = (0.0, 0.0, 0.0);
+                const NR: usize = 8;
+                for ip in 0..NR {
+                    let phi = (ip as f64 * 360.0 / NR as f64).to_radians();
+                    let tb = v3(phi.cos(), 0.0, phi.sin());
+                    let axis = v3(0.0, 1.0, 0.0).cross(tb);
+                    let q = Quat::angle_axis(a, axis);
+                    // tilt direction of the up axis away from +Y (the airflow axis -v)
+                    let up = q.rotate(v3(0.0, 1.0, 0.0));
+                    let hz = up - v3(0.0, up.y, 0.0);
+                    let tdir = if hz.norm() > 1e-9 { hz.normalized() } else { tb };
+                    let (f, tq) = aero_force(spec, com_l, q, v3(0.0, -spd, 0.0), V3::ZERO, &atm);
+                    cd += f.y / q_kpa;
+                    cl += f.dot(tdir) / q_kpa;
+                    cm += tq.dot(axis) / q_kpa;
+                }
+                let k = im * N_BIG + ia;
+                t.big_cd[k] = cd / NR as f64;
+                t.big_cl[k] = cl / NR as f64;
+                t.big_cm[k] = cm / NR as f64;
+            }
+        }
         let n0 = (TABLE_MACH_MAX / CD0_MACH_STEP) as usize + 1;
         for im in 0..n0 {
             let mach = (im as f64 * CD0_MACH_STEP).max(1e-3);
@@ -325,6 +362,27 @@ impl AeroTables {
     pub fn cm_at(&self, mach: f64, alpha_deg: f64, phi: Option<f64>) -> f64 {
         self.interp(&self.cm, mach, alpha_deg, phi)
     }
+    fn big(&self, tab: &[f64], mach: f64, alpha_deg: f64) -> f64 {
+        let fm = (mach / self.mach_step).clamp(0.0, (self.n_mach - 1) as f64 - 1e-9);
+        let fa = (alpha_deg.abs() / BIG_ALPHA_STEP).clamp(0.0, (N_BIG - 1) as f64 - 1e-9);
+        let (im, ia) = (fm as usize, fa as usize);
+        let (tm, ta) = (fm - im as f64, fa - ia as f64);
+        let at = |m: usize, a: usize| tab[m * N_BIG + a];
+        let a0 = at(im, ia) + (at(im, ia + 1) - at(im, ia)) * ta;
+        let a1 = at(im + 1, ia) + (at(im + 1, ia + 1) - at(im + 1, ia)) * ta;
+        a0 + (a1 - a0) * tm
+    }
+    /// Roll-averaged coefficients for any angle of attack (0..180 deg).
+    pub fn big_cd(&self, mach: f64, alpha_deg: f64) -> f64 {
+        self.big(&self.big_cd, mach, alpha_deg)
+    }
+    pub fn big_cl(&self, mach: f64, alpha_deg: f64) -> f64 {
+        self.big(&self.big_cl, mach, alpha_deg)
+    }
+    pub fn big_cm(&self, mach: f64, alpha_deg: f64) -> f64 {
+        self.big(&self.big_cm, mach, alpha_deg)
+    }
+
     /// Largest angle of attack (deg, <= 20) at tilt azimuth `phi` whose aero moment at dynamic
     /// pressure q stays within `torque` (kN m), interpolated between table rows.
     pub fn alpha_limit(&self, mach: f64, q_kpa: f64, torque: f64, phi: Option<f64>) -> f64 {

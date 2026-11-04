@@ -35,12 +35,12 @@ fn main() {
         counts[x.outcome as usize] += 1;
         let s = &x.stats;
         let m = (s.final_e.powi(2) + s.final_n.powi(2)).sqrt();
-        if x.outcome == Outcome::Landed {
+        if x.outcome == Outcome::Landed && s.divert == 0 && s.abort == 0 {
             miss.push(m);
         }
         if std::env::var("MC_VERBOSE").is_ok() {
-            println!("#{:<4} {:>3}t {:<22} {:?} miss {:7.1} vz {:5.1} vh {:5.1} tilt {:4.1} ign_err {:6.1} entry {:6.1} bb_end {:6.1} prop {:5.2}/{:5.1} sep {:5.0}m {:4.0}m/s",
-                idx, x.sh.built.design.size, x.sh.built.design.label(), x.outcome, m, s.td_vz, s.td_vh, s.td_tilt_deg, s.ign_err, s.entry_err, s.bb_end_err, s.prop_left, s.prop_cap, s.sep_alt, s.sep_speed);
+            println!("#{:<4} {:>3}t {:<22} {:?}{} miss {:7.1} vz {:5.1} vh {:5.1} tilt {:4.1} ign_err {:6.1} entry {:6.1} bb_end {:6.1} prop {:5.2}/{:5.1} sep {:5.0}m {:4.0}m/s",
+                idx, x.sh.built.design.size, x.sh.built.design.label(), x.outcome, if s.abort > 0 { "(abort)" } else if s.divert > 0 { "(divert)" } else { "" }, m, s.td_vz, s.td_vh, s.td_tilt_deg, s.ign_err, s.entry_err, s.bb_end_err, s.prop_left, s.prop_cap, s.sep_alt, s.sep_speed);
         }
     }
     miss.sort_by(|a, b| a.partial_cmp(b).unwrap());

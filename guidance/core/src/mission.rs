@@ -179,6 +179,17 @@ pub struct Stats {
     pub max_q_descent: f64,
     pub gfold_solves: u32,
     pub gfold_fail: u32,
+    /// 1 if the return to the pad was declared infeasible at separation (propellant)
+    pub abort: u32,
+    /// time spent swinging to engine-first on the gimbal in the air (s)
+    pub swing_burn_s: f64,
+    /// landing-burn divert reach at ignition (m); 1 if the pad was out of reach and the booster
+    /// was retargeted to its predicted touchdown point
+    pub ign_reach: f64,
+    pub divert: u32,
+    /// predicted propellant need / available at separation (t)
+    pub sep_need: f64,
+    pub sep_have: f64,
     /// descent trim burns flown, and their total delta-v (m/s)
     pub trim_burns: u32,
     pub trim_dv: f64,
@@ -189,6 +200,17 @@ pub type RecSample = [f32; 6];
 
 /// The landing divert aims to be done this long before touchdown (s).
 pub const TAIL_S: f64 = 3.0;
+/// Aim boostbacks on low arcs past the pad (superseded by the swing model in the predictor; off).
+pub const AIM_LONG: bool = false;
+/// Retarget to the predicted touchdown point when the pad is beyond the landing burn's reach.
+pub const DIVERT: bool = true;
+/// Fraction of the nominal divert reach the landing burn reliably achieves (lift reversal and
+/// attitude lag eat the rest; calibrated on Monte Carlo replays).
+pub const REACH_FRACTION: f64 = 0.2;
+/// Drive the in-air swing to engine-first with the gimbal (tried; costs more than it saves: off).
+pub const GIMBAL_SWING: bool = false;
+/// A 180 degree flip should take about this long (sets the gimbal-assist throttle).
+pub const FLIP_TIME_S: f64 = 20.0;
 /// Highest planned landing-burn deceleration (in g above hover).
 pub const MAX_LANDING_G: f64 = 3.0;
 
@@ -226,6 +248,13 @@ pub struct Flight {
     aim_bias: (f64, f64),
     /// time limit of the current boostback / trim burn (s, phase time)
     burn_limit: f64,
+    /// landing target offset from the pad centre (east, north, m): zero unless the return was
+    /// declared infeasible at separation (then: the booster's own predicted impact point)
+    target: (f64, f64),
+    /// touchdown-error correction for a pending swing to engine-first in the air: the 6-DOF
+    /// swing (nominal model, real attitude controller) minus the point-mass swing model
+    swing_bias: (f64, f64),
+    bb_plan_max: f64,
     hold_h: f64,
     t_settle: f64,
     last_thrust: f64,
@@ -281,6 +310,9 @@ impl Flight {
             contact_t: 0.0,
             aim_bias: (0.0, 0.0),
             burn_limit: f64::INFINITY,
+            target: (0.0, 0.0),
+            swing_bias: (0.0, 0.0),
+            bb_plan_max: 0.0,
             hold_h: 2.0,
             t_settle: 1.0,
             last_thrust: 0.0,
@@ -333,16 +365,92 @@ impl Flight {
     fn pip_at(&self, n: &Nav, v: V3, m: f64, aoa: (f64, f64)) -> PredResult {
         let c = self.pred_craft(n);
         let aoa_torque = if aoa != (0.0, 0.0) { self.aoa_torque(n).max(1e-9) } else { 0.0 };
-        predict(&c, &PredOpts { aoa, aoa_torque, burn: Some(self.burn_model()), sim_offset: true, ..Default::default() }, n.x, v, m)
+        let flip = self.flip_model(n, v);
+        predict(&c, &PredOpts { aoa, aoa_torque, flip, burn: Some(self.burn_model()), sim_offset: true, ..Default::default() }, n.x, v, m)
+    }
+
+    /// Fly the pending swing to engine-first in a copy of the sim state with the guidance's own
+    /// (nominal) model and the real attitude controller, engines off, until the axis is within
+    /// 15 degrees of the airflow; then finish with the point-mass predictor. Returns the touchdown
+    /// error difference vs the point-mass swing model (the correction), or None if no swing in
+    /// the air is pending.
+    fn swing_correction(&self, n: &Nav) -> Option<(f64, f64)> {
+        let fm = self.flip_model(n, n.v)?;
+        if fm.alpha0 < 30f64.to_radians() || n.alt > KERBIN.atmosphere_depth {
+            return None;
+        }
+        let spec = &self.sh.built.booster;
+        let mut st = self.st;
+        let prm = self.prm;
+        let mut k = 0;
+        loop {
+            let nn = nav(spec, &st);
+            let w = -nn.v.normalized();
+            let aoa = nn.up.dot(w).clamp(-1.0, 1.0).acos();
+            if aoa < 15f64.to_radians() || k > 50 * 120 || nn.alt < 1500.0 {
+                break;
+            }
+            let o = attitude::point(spec, &st, &nn, w, 0.0, true);
+            sim::tick(spec, &prm, &mut st, &o.ctl);
+            k += 1;
+            if st.status != STATUS_FLYING {
+                return None;
+            }
+        }
+        let nn = nav(spec, &st);
+        let c = self.pred_craft(&nn);
+        let opts = PredOpts { burn: Some(self.burn_model()), sim_offset: true, ..Default::default() };
+        let p6 = predict(&c, &opts, nn.x, nn.v, nn.m);
+        let pm = self.pip_at(n, n.v, n.m, (0.0, 0.0));
+        if !p6.ok || !pm.ok {
+            return None;
+        }
+        let pad = Pad::ksc();
+        let (a, b) = (pad.ground_offset(p6.x), pad.ground_offset(pm.x));
+        Some((a.0 - b.0, a.1 - b.1))
+    }
+
+    fn update_swing_bias(&mut self, n: &Nav) {
+        self.swing_bias = (0.0, 0.0);
+        if let Some(b) = self.swing_correction(n) {
+            self.swing_bias = b;
+        }
+    }
+
+    /// The swing to engine-first the booster still has to make from its current attitude, for
+    /// velocity `v` (after a planned impulse): None if it is already within 10 degrees.
+    fn flip_model(&self, n: &Nav, v: V3) -> Option<crate::predict::Flip> {
+        let w = -v.normalized();
+        let c = n.up.dot(w).clamp(-1.0, 1.0);
+        let alpha0 = c.acos();
+        if alpha0 < 10f64.to_radians() || self.phase == Phase::Ascent {
+            return None;
+        }
+        let perp = n.up - w * c;
+        let tilt = if perp.norm() > 1e-6 { perp.normalized() } else { w.cross(v3(0.0, 0.0, 1.0)).normalized() };
+        // swing axis: rotating the axis toward -v
+        let axis = n.up.cross(w);
+        let axis = if axis.norm() > 1e-9 { axis.normalized() } else { tilt.cross(w).normalized() };
+        let axis_l = n.q.conj().rotate(axis);
+        let e0 = effectiveness(self.spec(), &self.st, n, 0.0);
+        let cap = capacity(&e0.b_rw, axis_l);
+        let i = axis_l.dot(v3(
+            n.inertia_l[0][0] * axis_l.x + n.inertia_l[0][1] * axis_l.y + n.inertia_l[0][2] * axis_l.z,
+            n.inertia_l[1][0] * axis_l.x + n.inertia_l[1][1] * axis_l.y + n.inertia_l[1][2] * axis_l.z,
+            n.inertia_l[2][0] * axis_l.x + n.inertia_l[2][1] * axis_l.y + n.inertia_l[2][2] * axis_l.z,
+        ));
+        let rate0 = -n.q.rotate(n.w_l).dot(axis);
+        Some(crate::predict::Flip { alpha0, rate0, tilt, cap, inertia: i })
     }
 
     /// Touchdown error vs the current aim point (pad + boostback bias while boosting back).
     fn pip_err(&self, p: &PredResult) -> (f64, f64) {
         let (e, n) = Pad::ksc().ground_offset(p.x);
+        let (e, n) = (e + self.swing_bias.0, n + self.swing_bias.1);
         if matches!(self.phase, Phase::Flip | Phase::Boostback) && self.stats.trim_burns == 0 {
             (e - self.aim_bias.0, n - self.aim_bias.1)
         } else {
-            (e, n)
+            (e - self.target.0, n - self.target.1)
         }
     }
 
@@ -371,9 +479,20 @@ impl Flight {
         if err > 100.0 {
             return (f64::INFINITY, have);
         }
-        // finite burn + flip losses: 10 % on the boostback
+        // flip loss: the gimbal-assisted flip burns at the control throttle for the flip time,
+        // mostly in the wrong direction; plus 5 % finite-burn loss on the boostback itself
         let ve_vac = propulsion(&b, 0.0).isp * ENGINE_G0;
-        let m_after = m_b * (-1.1 * dv.norm() / ve_vac).exp();
+        let theta = nb.up.dot(dv.normalized()).clamp(-1.0, 1.0).acos();
+        let axis = nb.up.cross(dv.normalized());
+        let alpha_need = 4.0 * std::f64::consts::PI / (FLIP_TIME_S * FLIP_TIME_S);
+        let flip_loss = if axis.norm() > 1e-6 {
+            let u = self.control_throttle_for(&b, &nb, nb.q.conj().rotate(axis.normalized()), alpha_need);
+            let t_flip = 2.0 * (theta / alpha_need).sqrt();
+            u * propulsion(&b, 0.0).thrust / m_b * t_flip
+        } else {
+            0.0
+        };
+        let m_after = m_b * (-(1.05 * dv.norm() + flip_loss) / ve_vac).exp();
         let p = self.pip_at(&nb, nb.v + dv, m_after, (0.0, 0.0));
         if debug() {
             eprintln!("  t {:.1} budget: dv {:.0} err {:.1} m_b {:.2} m_after {:.2} m_td {:.2} ok {} dry {} have {:.2}", self.st.ut - self.disp.ut, dv.norm(), err, m_b, m_after, p.m, p.ok, p.dry, have);
@@ -422,8 +541,22 @@ impl Flight {
         let dv = n.to_state_frame(pad.vec_from_enu(self.disp.sep_dv));
         self.st.v += dv;
         self.st.w += self.disp.sep_w;
+        // can the booster still make it home? (same budget the ascent cut-off used)
+        let (need, have) = self.rtls_budget(n);
+        self.stats.sep_need = need;
+        self.stats.sep_have = have;
         self.set_phase(Phase::Flip);
         self.bb_dv = V3::ZERO;
+        if need > have {
+            // infeasible: land at the booster's own predicted impact point instead
+            self.stats.abort = 1;
+            let nb = nav(&self.sh.built.booster, &self.st);
+            let p = self.pip(&nb, V3::ZERO, (0.0, 0.0));
+            if p.ok {
+                self.target = Pad::ksc().ground_offset(p.x);
+            }
+            self.set_phase(Phase::Coast);
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -510,7 +643,10 @@ impl Flight {
 
     /// Throttle needed so the gimbal gives `alpha_need` (rad/s^2) on top of the wheels.
     fn control_throttle(&self, n: &Nav, axis: V3, alpha_need: f64) -> f64 {
-        let spec = self.spec();
+        self.control_throttle_for(self.spec(), n, axis, alpha_need)
+    }
+
+    fn control_throttle_for(&self, spec: &VesselSpec, n: &Nav, axis: V3, alpha_need: f64) -> f64 {
         let i_n = axis.dot(v3(
             n.inertia_l[0][0] * axis.x + n.inertia_l[0][1] * axis.y + n.inertia_l[0][2] * axis.z,
             n.inertia_l[1][0] * axis.x + n.inertia_l[1][1] * axis.y + n.inertia_l[1][2] * axis.z,
@@ -554,6 +690,13 @@ impl Flight {
         // round (e.g. right after an in-atmosphere boostback) its predictions are meaningless
         let aoa_now = n.up.dot(-n.v.normalized()).clamp(-1.0, 1.0).acos().to_degrees();
         if aoa_now > 30.0 {
+            if debug() {
+                let pp = self.pip(n, V3::ZERO, (0.0, 0.0));
+                let e = self.pip_err(&pp);
+                let pl = (n.up - (-n.v.normalized()) * n.up.dot(-n.v.normalized())).normalized();
+                let w = n.q.rotate(n.w_l);
+                eprintln!("  SWING t {:.1} alt {:.0} v {:.0} aoa {:.0} err ({:.0},{:.0}) tiltdir ENU ({:.2},{:.2},{:.2}) w {:.3} w_inplane {:.3}", self.st.ut - self.disp.ut, n.alt, n.v.norm(), aoa_now, e.0, e.1, Pad::ksc().vec_to_enu(pl).x, Pad::ksc().vec_to_enu(pl).y, Pad::ksc().vec_to_enu(pl).z, w.norm(), w.dot(n.up.cross(-n.v.normalized()).normalized()));
+            }
             self.aoa = (0.0, 0.0);
             return;
         }
@@ -648,7 +791,7 @@ impl Flight {
         let h_td = touchdown_height(self.spec(), n.com_l);
         let (de, dn) = pad.ground_offset(n.x);
         let h = n.x.norm() - (KERBIN.radius + ksc::KSC_PAD_DECK_ALT) - h_td;
-        (v3(de, dn, h), pad.vec_to_enu(n.v), h_td)
+        (v3(de - self.target.0, dn - self.target.1, h), pad.vec_to_enu(n.v), h_td)
     }
 
     /// Non-thrust accelerations in pad ENU: (gravity + centrifugal, Coriolis, drag at the
@@ -663,6 +806,18 @@ impl Flight {
         (pad.vec_to_enu(g), pad.vec_to_enu(cor), pad.vec_to_enu(fa / n.m))
     }
 
+
+    /// Lateral reach of the landing burn from here (m).
+    fn divert_reach(&mut self, n: &Nav) -> f64 {
+        self.update_hold_height(n);
+        let st = self.stop(n);
+        let pr = propulsion(self.spec(), p_atm(n.alt));
+        let a_z = st.u.min(1.0) * pr.thrust / n.m;
+        let a_lat = 0.5 * 25f64.to_radians().tan() * a_z;
+        let tail = TAIL_S.max(self.hold_height() / self.cfg.v_td.max(0.1) + 2.0 * self.t_settle);
+        let t = (st.t_go - tail).max(0.0);
+        a_lat * (0.5 * t) * (0.5 * t)
+    }
 
     /// Constant-throttle stop solution for the vertical channel from the current state.
     /// The stop is planned to end `hold_height` above touchdown; the last stretch is flown at the
@@ -910,6 +1065,9 @@ impl Flight {
             Phase::Flip | Phase::Boostback => {
                 if due {
                     self.guid_timer = if self.phase == Phase::Flip { 0.5 } else { 0.2 };
+                    if self.phase == Phase::Boostback {
+                        self.update_swing_bias(&n);
+                    }
                     let guess = if self.bb_dv.norm2() > 0.0 { self.bb_dv } else { self.boostback_guess(&n) };
                     // final trim only: keep the residual on the thrust axis
                     let trim = self.phase == Phase::Boostback && (self.stats.trim_burns > 0 || self.bb_dv.norm() < (0.05 * self.stats.bb_dv_plan).max(5.0));
@@ -918,12 +1076,15 @@ impl Flight {
                         Some((dv, _err)) => {
                             self.bb_dv = dv;
                             self.bb_fail = 0;
+                            if self.phase == Phase::Flip {
+                                self.bb_plan_max = self.bb_plan_max.max(dv.norm());
+                            }
                             if self.stats.bb_dv_plan == 0.0 {
                                 self.stats.bb_dv_plan = dv.norm();
                                 // arc apogee in the dense air: aim past the pad by 5 % of the
                                 // current downrange (<= 800 m)
                                 let p = self.pip(&n, dv, (0.0, 0.0));
-                                if p.ok && p.apo < 50_000.0 {
+                                if AIM_LONG && p.ok && p.apo < 50_000.0 {
                                     let (de, dn) = Pad::ksc().ground_offset(n.x);
                                     let d = (de * de + dn * dn).sqrt().max(1.0);
                                     let b = (0.05 * d).min(800.0);
@@ -943,7 +1104,7 @@ impl Flight {
                 if self.phase == Phase::Flip {
                     // gimbal-assisted flip if the wheels alone are too slow (aim: ~20 s for 180 deg)
                     let axis = n.q.conj().rotate(n.up.cross(self.cmd_dir)).normalized();
-                    let alpha_need = 4.0 * std::f64::consts::PI / (20.0f64 * 20.0);
+                    let alpha_need = 4.0 * std::f64::consts::PI / (FLIP_TIME_S * FLIP_TIME_S);
                     self.cmd_thr = if axis.norm2() > 0.0 { self.control_throttle(&n, axis, alpha_need) } else { 0.0 };
                     if err < 10f64.to_radians() && self.t_phase > 1.0 {
                         self.set_phase(Phase::Boostback);
@@ -954,7 +1115,14 @@ impl Flight {
                 } else {
                     let tau_end = 1.5;
                     let thr = (dvn * n.m / (pr.thrust * tau_end)).clamp(0.0, 1.0);
-                    self.cmd_thr = if err < 20f64.to_radians() { thr.max(pr.throttle_min) } else { 0.05 };
+                    // off the axis: only the throttle the gimbal needs to bring it back
+                    self.cmd_thr = if err < 20f64.to_radians() {
+                        thr.max(pr.throttle_min)
+                    } else {
+                        let ax = n.up.cross(self.cmd_dir);
+                        let alpha_need = 4.0 * std::f64::consts::PI / (FLIP_TIME_S * FLIP_TIME_S);
+                        if ax.norm() > 1e-6 { self.control_throttle(&n, n.q.conj().rotate(ax.normalized()), alpha_need).min(0.05) } else { 0.0 }
+                    };
                     let (p_left, _) = propellant(self.spec(), &self.st.res);
                     // done: residual below 0.25 m/s; or the residual points off the thrust axis
                     // (chasing it would mean another flip) and is either tiny or already worth
@@ -966,14 +1134,20 @@ impl Flight {
                         let e = self.pip_err(&pp);
                         (e.0 * e.0 + e.1 * e.1).sqrt() < 20.0
                     };
-                    let t_plan = crate::predict::burn_time(pr.thrust, pr.isp, self.stats.sep_mass, self.stats.bb_dv_plan);
+                    self.bb_plan_max = self.bb_plan_max.max(self.stats.bb_dv_plan);
+                    let t_plan = crate::predict::burn_time(pr.thrust, pr.isp, self.stats.sep_mass, self.bb_plan_max);
                     // in trim mode the residual is kept on the axis; pointing backwards = overshot
-                    let overshot = (self.stats.trim_burns > 0 || dvn < (0.05 * self.stats.bb_dv_plan).max(5.0)) && self.bb_dv.dot(n.up) <= 0.0;
-                    let limit = if self.stats.trim_burns > 0 { self.burn_limit } else { 2.0 * t_plan + 30.0 };
+                    let trim_mode = self.stats.trim_burns > 0 || dvn < (0.05 * self.stats.bb_dv_plan).max(5.0);
+                    // in the trim regime a residual off the axis (or behind it) ends the burn
+                    let overshot = trim_mode && (self.bb_dv.dot(n.up) <= 0.0 || (off_axis && dvn < 1.0));
+                    let limit = if self.stats.trim_burns > 0 { self.burn_limit } else { 2.0 * t_plan + 60.0 };
                     // a trim never runs into the landing burn
                     let (rr, _, _) = self.landing_state(&n);
                     let landing_due = self.stats.trim_burns > 0 && landing_need(self.spec(), &self.sh.tables, self.st.toff as f64, n.x, n.v, n.m, rr.z, self.cfg.v_td).0 >= 0.8 * self.f_ign_eff(n.m);
                     if dvn < 0.25 || overshot || landing_due || (off_axis && dvn < 0.5) || pip_ok || self.t_phase > limit || p_left <= 1e-6 || self.bb_fail > 25 {
+                        if debug() {
+                            eprintln!("  BB cutoff: dvn {dvn:.2} overshot {overshot} landing {landing_due} off_axis {off_axis} pip_ok {pip_ok} time {} fuel {} fails {} dot {:.2}", self.t_phase > limit, p_left <= 1e-6, self.bb_fail, self.bb_dv.dot(n.up));
+                        }
                         let m_sep = self.stats.sep_mass;
                         let ve = propulsion(self.spec(), 0.0).isp * ENGINE_G0;
                         self.stats.bb_dv_used = ve * (m_sep / n.m).ln();
@@ -1000,6 +1174,13 @@ impl Flight {
                 self.stats.apo_alt = self.stats.apo_alt.max(n.alt);
                 if due {
                     self.guid_timer = 1.0;
+                    if debug() {
+                        let pp = self.pip(&n, V3::ZERO, (0.0, 0.0));
+                        let e = self.pip_err(&pp);
+                        let aoa = n.up.dot(-n.v.normalized()).clamp(-1.0, 1.0).acos().to_degrees();
+                        let atm = atm_at(n.alt, n.v.norm(), self.st.toff as f64);
+                        eprintln!("  COAST t {:.0} alt {:.0} v {:.0} q {:.2} aoa {:.0} err ({:.0},{:.0})", self.st.ut - self.disp.ut, n.alt, n.v.norm(), atm.q_kpa, aoa, e.0, e.1);
+                    }
                     if n.alt > KERBIN.atmosphere_depth {
                         let c = self.pred_craft(&n);
                         let p = predict(&c, &PredOpts { stop_alt: Some(KERBIN.atmosphere_depth - 1.0), sim_offset: true, ..Default::default() }, n.x, n.v, n.m);
@@ -1027,7 +1208,21 @@ impl Flight {
                 self.stats.max_q_descent = self.stats.max_q_descent.max(atm.q_kpa);
                 if due {
                     self.guid_timer = 0.5;
+                    self.update_swing_bias(&n);
                     self.descent_guidance(&n);
+                }
+                // still far from engine-first in the air and the wheels can't win against the
+                // aero moment: swing on the gimbal at the least throttle that gives the authority
+                let w_air = -n.v.normalized();
+                let aoa_now = n.up.dot(w_air).clamp(-1.0, 1.0).acos();
+                if GIMBAL_SWING && aoa_now > 30f64.to_radians() && atm.q_kpa > 0.05 {
+                    let ax = n.up.cross(w_air);
+                    let ax = if ax.norm() > 1e-6 { ax.normalized() } else { n.q.rotate(v3(1.0, 0.0, 0.0)) };
+                    let alpha_need = 4.0 * std::f64::consts::PI / (FLIP_TIME_S * FLIP_TIME_S);
+                    let u = self.control_throttle(&n, n.q.conj().rotate(ax), alpha_need);
+                    let pr = propulsion(self.spec(), p_atm(n.alt));
+                    self.cmd_thr = if u > 0.0 { u.max(pr.throttle_min).min(0.5) } else { 0.0 };
+                    self.stats.swing_burn_s += if self.cmd_thr > 0.0 { dt } else { 0.0 };
                 }
                 self.cmd_dir = self.descent_dir(&n);
                 // ignition check (every tick once the quick estimate is close)
@@ -1044,6 +1239,18 @@ impl Flight {
                     let pp = self.pip(&n, V3::ZERO, (0.0, 0.0));
                     let e = self.pip_err(&pp);
                     self.stats.ign_err = (e.0 * e.0 + e.1 * e.1).sqrt();
+                    // divert reach of this landing burn (bang-bang at half the tilt-limited side
+                    // acceleration over the burn minus its upright tail); pad outside it: land
+                    // safely at the predicted touchdown point instead
+                    let reach = self.divert_reach(&n);
+                    self.stats.ign_reach = reach;
+                    if debug() {
+                        eprintln!("  ignition: pip err {:.1} m, divert reach {:.1} m", self.stats.ign_err, reach);
+                    }
+                    if DIVERT && self.stats.ign_err > REACH_FRACTION * reach && pp.ok {
+                        self.stats.divert = 1;
+                        self.target = Pad::ksc().ground_offset(pp.x);
+                    }
                     self.stats.ign_t = self.st.ut - self.disp.ut;
                     self.prop_at_ign = propellant(self.spec(), &self.st.res).0;
                     self.set_phase(Phase::LandingBurn);
@@ -1153,7 +1360,7 @@ impl Flight {
         }
         // landed but nowhere near the pad and short of fuel: classify as no-return
         let miss = (e * e + nn * nn).sqrt();
-        self.outcome = if o == Outcome::Landed && miss > 2000.0 { Outcome::NoReturn } else { o };
+        self.outcome = if o == Outcome::Landed && miss > 2000.0 && self.stats.abort == 0 { Outcome::NoReturn } else { o };
         self.record(n, true);
         self.phase = Phase::Done;
     }
