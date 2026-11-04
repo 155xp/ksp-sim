@@ -60,14 +60,14 @@ impl Craft {
         self.parts.len() - 1
     }
 
-    /// The default lander: Mk1 pod / FL-T400 / LV-T45 Swivel, three LT-1 legs at the tank base.
+    /// The default lander: Mk1 pod / FL-T400 / LV-T45 Swivel, three LT-2 legs on the tank.
     pub fn hopper() -> Craft {
         use crate::parts::*;
         let mut c = Craft { parts: vec![Placed { def: mk1pod_v2(), pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![] }] };
         let tank = c.stack_below(0, fuel_tank_t400());
         let _eng = c.stack_below(tank, swivel());
         for k in 0..3 {
-            c.surface_attach(tank, lt1_leg(), 90.0 + 120.0 * k as f64, 0.625, -0.85);
+            c.surface_attach(tank, lt2_leg(), 90.0 + 120.0 * k as f64, 0.625, -0.6);
         }
         c
     }
@@ -340,9 +340,9 @@ mod tests {
         assert_eq!(s.n_engines, 1);
         assert_eq!(s.n_legs, 3);
         let (m, com, it) = s.mass_props(&s.full_resources());
-        // 0.8 + 0.25 + 1.5 + 3*0.05 dry, + 400 units * 0.005 + 10 mono * 0.004
-        assert!((m - (2.7 + 2.0 + 0.04)).abs() < 1e-12, "{m}");
-        assert!((s.dry_mass() - 2.7).abs() < 1e-12);
+        // 0.8 + 0.25 + 1.5 + 3*0.1 dry, + 400 units * 0.005 + 10 mono * 0.004
+        assert!((m - (2.85 + 2.0 + 0.04)).abs() < 1e-12, "{m}");
+        assert!((s.dry_mass() - 2.85).abs() < 1e-12);
         assert!(com.x.abs() < 1e-9 && com.z.abs() < 1e-9);
         assert!(it[0][0] > 0.0 && it[1][1] > 0.0 && it[2][2] > 0.0);
         // tank top node meets pod bottom node

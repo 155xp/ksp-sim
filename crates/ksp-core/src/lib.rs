@@ -10,4 +10,5 @@ pub mod ksc;
 pub mod math;
 pub mod orbit;
 pub mod parts;
+pub mod sim;
 pub mod vessel;

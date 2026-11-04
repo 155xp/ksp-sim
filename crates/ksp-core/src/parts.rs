@@ -215,6 +215,32 @@ pub fn lt1_leg() -> PartDef {
     }
 }
 
+/// LT-2 Landing Strut, deployed. Utility/landingLegLT-2/landingLegLT-2.cfg (CoMOffset 0,0,0.1;
+/// ModuleWheelSuspension suspensionDistance 0.95, springRatio 33, damperRatio 2.2);
+/// "Deployed" cube from PartDatabase.cfg (landingLeg1-2).
+/// Part-local frame as surface-attached (origin at the attach point): +Y up along the vessel, +Z
+/// into the parent. Foot point approximated from the deployed cube's lower extent
+/// (cube centre y -0.7179, size y 3.025, node_attach y 0.427 -> 2.66 m below the attach point)
+/// and ~0.45 m radial spread (the wheel collider itself lives in the model file).
+pub fn lt2_leg() -> PartDef {
+    PartDef {
+        name: "landingLeg1-2",
+        mass: 0.1,
+        com_offset: v3(0.0, 0.0, 0.1),
+        cop_offset: V3::ZERO,
+        angular_drag: 2.0,
+        crash_tolerance: 12.0,
+        body_lift: true,
+        cube: cube("Deployed, 0.5144,0.8194,0.6012, 0.5144,0.8194,1.093, 0.2288,0.6022,0.6196, 0.2288,0.7097,3.098, 0.8535,0.7444,0.6931, 0.8535,0.7363,0.5937, 0.0001921,-0.7179,0.1662, 1.017,3.025,0.6183"),
+        node_top: None,
+        node_bottom: None,
+        resources: vec![],
+        engine: None,
+        reaction_wheel: None,
+        leg: Some(LegDef { foot: v3(0.0, -2.66, -0.45), suspension_distance: 0.95, spring_ratio: 33.0, damper_ratio: 2.2 }),
+    }
+}
+
 pub fn by_name(name: &str) -> Option<PartDef> {
     Some(match name {
         "mk1pod_v2" => mk1pod_v2(),
@@ -222,6 +248,7 @@ pub fn by_name(name: &str) -> Option<PartDef> {
         "liquidEngine2_v2" => swivel(),
         "liquidEngine3_v2" => terrier(),
         "landingLeg1" => lt1_leg(),
+        "landingLeg1-2" => lt2_leg(),
         _ => return None,
     })
 }
@@ -258,6 +285,7 @@ mod tests {
             ("Engine/liquidEngineLV-T45_v2/liquidEngineLV-T45_v2.cfg", swivel(), "Clean"),
             ("Engine/liquidEngineLV-909_v2/liquidEngineLV-909_v2.cfg", terrier(), "Clean"),
             ("Utility/landingLegLT-1/landingLegLT-1.cfg", lt1_leg(), "Deployed"),
+            ("Utility/landingLegLT-2/landingLegLT-2.cfg", lt2_leg(), "Deployed"),
         ];
         for (rel, def, cube_name) in cases {
             let p = part_node(&parts.join(rel));
