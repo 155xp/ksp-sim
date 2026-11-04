@@ -210,6 +210,8 @@ pub const DIVERT: bool = true;
 pub const REACH_FRACTION: f64 = 0.2;
 /// Drive the in-air swing to engine-first with the gimbal (tried; costs more than it saves: off).
 pub const GIMBAL_SWING: bool = false;
+/// Coast instead of full-throttle flip assist when even full throttle cannot beat the aero moment.
+pub const COAST_IF_UNWINNABLE: bool = false;
 /// A 180 degree flip should take about this long (sets the gimbal-assist throttle).
 pub const FLIP_TIME_S: f64 = 20.0;
 /// Highest planned landing-burn deceleration (in g above hover).
@@ -670,7 +672,7 @@ impl Flight {
         let u = (need - a_rw) / a_g;
         // even full throttle can't win against the aero moment: thrusting would only push the
         // booster along its current (wrong) axis; coast until the air thins instead
-        if u > 1.0 { 0.0 } else { u.max(0.0) }
+        if u > 1.0 && COAST_IF_UNWINNABLE { 0.0 } else { u.clamp(0.0, 1.0) }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1127,6 +1129,11 @@ impl Flight {
                     let axis = n.q.conj().rotate(n.up.cross(self.cmd_dir)).normalized();
                     let alpha_need = 4.0 * std::f64::consts::PI / (FLIP_TIME_S * FLIP_TIME_S);
                     self.cmd_thr = if axis.norm2() > 0.0 { self.control_throttle(&n, axis, alpha_need) } else { 0.0 };
+                    // full-throttle assist that hasn't brought it round in one flip time is losing
+                    // to the aero moment: coast up into thinner air instead
+                    if self.cmd_thr >= 0.999 && self.t_phase > FLIP_TIME_S {
+                        self.cmd_thr = 0.0;
+                    }
                     if err < 10f64.to_radians() && self.t_phase > 1.0 {
                         self.set_phase(Phase::Boostback);
                     }
@@ -1387,7 +1394,7 @@ impl Flight {
         }
         // landed but nowhere near the pad and short of fuel: classify as no-return
         let miss = (e * e + nn * nn).sqrt();
-        self.outcome = if o == Outcome::Landed && miss > 2000.0 && self.stats.abort == 0 { Outcome::NoReturn } else { o };
+        self.outcome = if o == Outcome::Landed && miss > 2000.0 && self.stats.abort == 0 && self.stats.divert == 0 { Outcome::NoReturn } else { o };
         self.record(n, true);
         self.phase = Phase::Done;
     }
