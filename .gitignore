@@ -9,3 +9,5 @@ __pycache__/
 .venv/
 *.egg-info/
 /data/
+harness/plugin/bin/
+harness/plugin/obj/
