@@ -95,6 +95,7 @@ fn fly_via_bridge(f: &mut Flight) {
             break;
         }
         // the sim plays the game: same truth spec as the guidance's current configuration
+        truth.st.brakes = g.st.brakes;
         let tspec = if g.phase == ksp_guidance::mission::Phase::Ascent { truth.truth_stack } else { truth.truth_booster };
         sim::tick(&tspec, &truth.prm, &mut truth.st, &ctl);
     }

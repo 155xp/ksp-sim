@@ -132,7 +132,7 @@ pub fn point(spec: &VesselSpec, st: &EnvState, nav: &Nav, dir: V3, throttle: f64
     // aero torque at the current state (root frame)
     let tau_aero = if aero_ff && nav.alt < ksp_core::body::KERBIN.atmosphere_depth {
         let atm = atm_at(nav.alt, nav.v.norm(), st.toff as f64);
-        let (_, tq) = aero_force(spec, nav.com_l, nav.q, nav.v, nav.q.rotate(w), &atm);
+        let (_, tq) = aero_force(spec, nav.com_l, nav.q, nav.v, nav.q.rotate(w), &atm, st.brake_deflection);
         nav.q.conj().rotate(tq)
     } else {
         V3::ZERO

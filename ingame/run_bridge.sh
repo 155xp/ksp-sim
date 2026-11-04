@@ -23,18 +23,20 @@ export BRIDGE_LOG="$HERE/telemetry/bridge_${stamp}.csv"
 "$REPO/guidance/target/release/examples/bridge" > "$HERE/telemetry/bridge_${stamp}.log" 2>&1 &
 bpid=$!
 echo RTLSDemo.craft > "$K/GameData/DemoHarness/launch.txt"
+rm -f "$K/KSP_player.log"
+sed -i "s/^SCREEN_RESOLUTION_WIDTH = .*/SCREEN_RESOLUTION_WIDTH = $W/; s/^SCREEN_RESOLUTION_HEIGHT = .*/SCREEN_RESOLUTION_HEIGHT = $H/" "$K/settings.cfg"
 export DISPLAY=:1 XAUTHORITY=$(ls /run/user/$(id -u)/xauth_* | head -1)
 cd "$K"
-./KSP.x86_64 -screen-fullscreen 0 -screen-width "$W" -screen-height "$H" -logFile "$K/KSP_player.log" > "$K/../launch.out" 2>&1 &
+./KSP.x86_64 -screen-fullscreen 0 -screen-width "$W" -screen-height "$H" ${KSP_ARGS:-} -logFile "$K/KSP_player.log" > "$K/../launch.out" 2>&1 &
 pid=$!
 echo $pid > "$K/../ksp.pid"
 echo "KSP pid $pid, bridge pid $bpid, log $BRIDGE_LOG"
 if [ -n "${RECORD:-}" ]; then
   until grep -aq "bridge: flying" "$K/KSP_player.log" 2>/dev/null || ! kill -0 $pid 2>/dev/null; do sleep 0.5; done
-  wid=$(xdotool search --pid $pid --onlyvisible 2>/dev/null | tail -1)
-  read X Y WW HH <<< "$(xwininfo -id "$wid" | awk '/Absolute upper-left X/{x=$4}/Absolute upper-left Y/{y=$4}/Width/{w=$2}/Height/{h=$2}END{print x, y, w, h}')"
-  echo "recording window $wid at $X,$Y ${WW}x$HH -> $RECORD.raw.mkv"
-  nice -n 5 ffmpeg -y -loglevel error -f x11grab -draw_mouse 0 -framerate 30 -video_size "${WW}x${HH}" -i "$DISPLAY+$X,$Y" \
+  wid=$(xdotool search --pid $pid 2>/dev/null | tail -1)
+  echo "recording window $wid ($(xwininfo -id "$wid" | grep -E 'Width|Height' | tr -s ' ' | tr '\n' ' ')) -> $RECORD.raw.mkv"
+  # Xwayland: the root window reads back black; grab the KSP window itself
+  nice -n 5 ffmpeg -y -loglevel error -f x11grab -window_id "$wid" -draw_mouse 0 -framerate 30 -i "$DISPLAY" \
     -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p "$RECORD.raw.mkv" &
   fpid=$!
 fi

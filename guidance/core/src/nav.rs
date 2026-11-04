@@ -126,8 +126,10 @@ pub fn atm_at(alt: f64, spd: f64, toff: f64) -> AtmState {
 
 /// Aerodynamic force (kN, frame of `q`) and torque about the CoM (kN m) on the vessel with
 /// attitude `q`, CoM velocity `v` relative to the air (same frame), angular velocity `w` (same
-/// frame). Mirrors ksp-core sim.rs step 5 (per-part cube drag + body lift) term by term.
-pub fn aero_force(spec: &VesselSpec, com_l: V3, q: Quat, v: V3, w: V3, atm: &AtmState) -> (V3, V3) {
+/// frame), airbrake deflection `defl` (deg). Calls ksp-core sim.rs step 5's own per-part
+/// (`sim::part_aero`: cube drag + body lift) and aero-surface (`sim::aero_surfaces`: airbrakes)
+/// functions, so it is the sim's force by construction.
+pub fn aero_force(spec: &VesselSpec, com_l: V3, q: Quat, v: V3, w: V3, atm: &AtmState, defl: f32) -> (V3, V3) {
     let mut force = V3::ZERO;
     let mut torque = V3::ZERO;
     if atm.rho <= 0.0 {
@@ -136,54 +138,33 @@ pub fn aero_force(spec: &VesselSpec, com_l: V3, q: Quat, v: V3, w: V3, atm: &Atm
     let r_com = q.rotate(com_l);
     let mt = mach_terms(atm.mach);
     for i in 0..spec.n_parts as usize {
-        let pc = q.rotate(spec.part_com[i]);
-        let vpart = v + w.cross(pc - r_com);
-        let s2 = vpart.norm2();
-        if s2 <= 0.0 {
+        if spec.part_no_cube_drag & (1 << i) != 0 {
             continue;
         }
-        let qp = atm.rho * 0.0005 * s2;
-        let vhat = vpart / s2.sqrt();
-        let prot = q * spec.part_rot[i];
-        let d = prot.conj().rotate(vhat);
-        let f = &spec.part_faces[i];
-        let (mut area_drag, mut area, mut lift_l) = (0.0, 0.0, V3::ZERO);
-        for j in 0..6 {
-            let dot = d.dot(FACE_DIRS[j]);
-            let dot01 = (dot + 1.0) * 0.5;
-            let s = if dot01 <= 0.5 {
-                (mt.tail + (mt.surf - mt.tail) * (2.0 * dot01)) * mt.mult
-            } else {
-                (mt.surf + (mt.tip - mt.surf) * (2.0 * dot01 - 1.0)) * mt.mult
-            };
-            let a = f.area[j] * s;
-            area += a;
-            if a == 0.0 {
-                continue;
-            }
-            let lcd = spec.part_face_ln_cd[i][j];
-            let cd = if lcd.is_nan() { f.drag[j] } else { (mt.cd_pow * lcd).exp() };
-            area_drag += a * cd;
-            if dot > 0.0 && spec.part_body_lift[i] != 0.0 {
-                let l = dot * f.area[j] * f.drag[j] * (eval(BODY_LIFT_CURVE, dot as f32 as f64) as f32 as f64);
-                lift_l -= FACE_DIRS[j] * l;
-            }
-        }
-        if area <= 0.0 {
-            area_drag = 0.0;
-        }
-        let drag = qp * area_drag * DRAG_CUBE_MULTIPLIER * atm.pseudo_re_drag_mult * DRAG_MULTIPLIER;
-        let mut fp = vhat * (-drag);
-        if spec.part_body_lift[i] != 0.0 {
-            let bl = qp * spec.part_body_lift[i] * BODY_LIFT_MULTIPLIER * mt.body_lift_mach;
-            let l = prot.rotate(lift_l * bl);
-            fp += l - vhat * l.dot(vhat);
-        }
-        force += fp;
-        let at = q.rotate(spec.part_cop[i]);
-        torque += (at - r_com).cross(fp);
+        let pc = q.rotate(spec.part_com[i]);
+        let pa = sim::part_aero(spec, i, q, v + w.cross(pc - r_com), atm, &mt);
+        let fd = pa.dir * (-pa.drag);
+        force += fd + pa.lift;
+        torque += (q.rotate(spec.part_cop[i]) - r_com).cross(fd);
+        torque += (q.rotate(spec.part_col[i]) - r_com).cross(pa.lift);
+    }
+    if spec.n_aero_surf > 0 {
+        let st = EnvState { q, w, brake_deflection: defl, ..Default::default() };
+        let (f, t) = sim::aero_surfaces(spec, &st, v, r_com, None, atm);
+        force += f;
+        torque += t;
     }
     (force, torque)
+}
+
+/// Fully deployed airbrake deflection of a spec (0 without airbrakes): the descent attitude the
+/// predictor's tables assume (brakes go out at the end of the boostback).
+pub fn deployed_deflection(spec: &VesselSpec) -> f32 {
+    if spec.n_aero_surf == 0 {
+        return 0.0;
+    }
+    let a = &spec.aero_surf[0];
+    a.deploy_angle.clamp(-1.5 * a.ctrl_surface_range, 1.5 * a.ctrl_surface_range) as f32
 }
 
 /// Per-craft aero tables for the engine-first attitude tilted by angle of attack `alpha`
@@ -239,7 +220,7 @@ impl AeroTables {
             let spd = mach * 300.0;
             let q_kpa = 0.0005 * spd * spd;
             let atm = AtmState { p_kpa: 50.0, t: 250.0, rho: 1.0, c: 300.0, mach, q_kpa, pseudo_re_drag_mult: 1.0 };
-            let (f, _) = aero_force(spec, com_l, Quat::IDENTITY, v3(0.0, -spd, 0.0), V3::ZERO, &atm);
+            let (f, _) = aero_force(spec, com_l, Quat::IDENTITY, v3(0.0, -spd, 0.0), V3::ZERO, &atm, deployed_deflection(spec));
             t.cd0.push(f.y / q_kpa);
         }
         let rho = 1.0;
@@ -259,7 +240,7 @@ impl AeroTables {
                     let q = Quat::angle_axis(a, axis);
                     let tdir = q.rotate(tb);
                     let tdir = (tdir - v3(0.0, tdir.y, 0.0)).normalized();
-                    let (f, tq) = aero_force(spec, com_l, q, v3(0.0, -spd, 0.0), V3::ZERO, &atm);
+                    let (f, tq) = aero_force(spec, com_l, q, v3(0.0, -spd, 0.0), V3::ZERO, &atm, deployed_deflection(spec));
                     let k = (im * n_alpha + ia) * N_PHI + ip;
                     t.cd[k] = f.y / q_kpa; // flow along -Y: drag points +Y
                     t.cl[k] = f.dot(tdir) / q_kpa;
@@ -418,7 +399,7 @@ mod tests {
             let mut b = a;
             let n0 = nav(&spec, &a);
             let atm = atm_at(n0.alt, n0.v.norm(), 0.0);
-            let (f, _) = aero_force(&spec, n0.com_l, n0.q, n0.v, V3::ZERO, &atm);
+            let (f, _) = aero_force(&spec, n0.com_l, n0.q, n0.v, V3::ZERO, &atm, a.brake_deflection);
             sim::tick(&spec, &prm, &mut a, &Control::default());
             sim::tick(&spec, &Params { aero: false, ..prm }, &mut b, &Control::default());
             let dv = (nav(&spec, &a).v - nav(&spec, &b).v) / sim::FIXED_DT * n0.m;
@@ -464,7 +445,7 @@ mod table_vs_direct {
             let tp = e1 * az.to_radians().cos() + e2 * az.to_radians().sin();
             let up = -vh * a.to_radians().cos() + tp * a.to_radians().sin();
             let q = ksp_core::sim::attitude(up, v3(0.0, 0.0, 1.0));
-            let (f, _) = aero_force(&spec, com_l, q, v, V3::ZERO, &atm);
+            let (f, _) = aero_force(&spec, com_l, q, v, V3::ZERO, &atm, deployed_deflection(&spec));
             let phi = tilt_azimuth(q.rotate(v3(1.0, 0.0, 0.0)), -vh, tp);
             let fm = -vh * (atm.q_kpa * t.cd_at(atm.mach, a, Some(phi))) + tp * (atm.q_kpa * t.cl_at(atm.mach, a, Some(phi))) + (-vh).cross(tp) * (atm.q_kpa * t.cs_at(atm.mach, a, Some(phi)));
             let lat_d = f - vh * f.dot(vh);

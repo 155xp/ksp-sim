@@ -1,6 +1,6 @@
 //! The in-game demo craft (ingame/make_demo_craft.py writes the same geometry as a .craft):
 //! booster = Mk1 pod (root, command + wheel) / FL-T800 / FL-T400 / LV-T45 Swivel with four LT-2
-//! legs placed by the VAB surface-attach rule, all from ksp-core's in-game validated part catalog;
+//! legs and four A.I.R.B.R.A.K.E.S placed by the VAB surface-attach rule, all from ksp-core's in-game validated part catalog;
 //! TD-12 on the pod (stays with the booster); upper stage = Terrier / FL-T400 / nose cone (inert during ascent, its
 //! propellant folded into dry mass, as `craft::build` does).
 
@@ -18,6 +18,9 @@ pub const LT2_NODE_DIR: V3 = v3(0.0, 0.5735765, 0.819152);
 /// legs: on the FL-T400, 0.9 m below its centre (the pad-tested hopper placement), azimuths
 pub const LEG_Y: f64 = -0.9;
 pub const LEG_AZ: [f64; 4] = [45.0, 135.0, 225.0, 315.0];
+/// airbrakes: on the FL-T800, 1.45 m above its centre
+pub const AIRBRAKE_Y: f64 = 1.45;
+pub const AIRBRAKE_AZ: [f64; 4] = [0.0, 90.0, 180.0, 270.0];
 
 fn place_above(c: &mut Craft, child: usize, def: PartDef) -> usize {
     let p = &c.parts[child];
@@ -40,8 +43,12 @@ pub fn crafts() -> Result<(Craft, Craft, usize), String> {
     for az in LEG_AZ {
         c.surface_attach_editor(t400, parts::lt2_leg(), az, 0.625, LEG_Y, LT2_NODE_POS, LT2_NODE_DIR);
     }
+    // four airbrakes near the top of the FL-T800 (grid-fin stand-ins), between the legs
+    for az in AIRBRAKE_AZ {
+        c.surface_attach_editor(t800, parts::airbrake(), az, 0.625, AIRBRAKE_Y, parts::AIRBRAKE_NODE.0, parts::AIRBRAKE_NODE.1);
+    }
     // TD-12 releases the part on its top node: the decoupler stays on the booster
-    let dec = place_above(&mut c, 0, partlib::load("Decoupler_1")?);
+    let dec = place_above(&mut c, 0, parts::decoupler_td12());
     let n_booster = c.parts.len();
     let booster = c.clone();
     // the upper Terrier stays unlit: no engine module in the sim (ksp-core pools propellant vessel-wide)

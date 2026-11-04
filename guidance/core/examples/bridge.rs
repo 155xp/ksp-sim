@@ -11,7 +11,7 @@
 //! usage: cargo run --release --example bridge
 use ksp_core::math::v3;
 use ksp_guidance::ingame;
-use ksp_guidance::mission::{Flight, GuidanceConfig, Phase, Shared};
+use ksp_guidance::mission::{Flight, GuidanceConfig, Shared};
 use ksp_guidance::nav::{nav, Pad};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
@@ -70,7 +70,7 @@ fn main() {
             } else {
                 fl.step_external(st, thrust_est)
             };
-            let brakes = matches!(fl.phase, Phase::Coast | Phase::Descent | Phase::LandingBurn | Phase::Touchdown | Phase::Done);
+            let brakes = fl.st.brakes;
             let done = fl.done() || (hold && tick >= 1000);
             let reply = format!(
                 "C {:.6} {:.6} {:.6} {:.6} {} {} {} {}\n",

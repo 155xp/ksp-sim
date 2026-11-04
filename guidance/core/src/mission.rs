@@ -544,7 +544,7 @@ impl Flight {
         let e1 = effectiveness(spec, &self.st, n, 1.0);
         // the aero moment at this state eats into the authority (worst case: it opposes)
         let atm = atm_at(n.alt, n.v.norm(), self.st.toff as f64);
-        let (_, tq) = aero_force(spec, n.com_l, n.q, n.v, V3::ZERO, &atm);
+        let (_, tq) = aero_force(spec, n.com_l, n.q, n.v, V3::ZERO, &atm, self.st.brake_deflection);
         let a_aero = n.q.conj().rotate(tq).norm() / i_n;
         let need = alpha_need + 1.5 * a_aero;
         let a_rw = capacity(&e0.b, axis) / i_n;
@@ -683,7 +683,7 @@ impl Flight {
         let g = n.x * (-KERBIN.gm() / (r2 * r2.sqrt())) - OMEGA.cross(OMEGA.cross(n.x));
         let cor = -(OMEGA.cross(n.v) * 2.0);
         let atm = atm_at(n.alt, n.v.norm(), self.st.toff as f64);
-        let (fa, _) = aero_force(self.spec(), n.com_l, n.q, n.v, V3::ZERO, &atm);
+        let (fa, _) = aero_force(self.spec(), n.com_l, n.q, n.v, V3::ZERO, &atm, self.st.brake_deflection);
         (pad.vec_to_enu(g), pad.vec_to_enu(cor), pad.vec_to_enu(fa / n.m))
     }
 
@@ -1005,6 +1005,8 @@ impl Flight {
                         let e = self.pip_err(&pp);
                         self.stats.bb_end_err = (e.0 * e.0 + e.1 * e.1).sqrt();
                         self.cmd_thr = 0.0;
+                        // airbrakes out for the coast and descent (the predictor's tables assume them)
+                        self.st.brakes = std::env::var("KSPG_NO_BRAKES").is_err();
                         self.set_phase(Phase::Coast);
                     }
                 }
@@ -1131,6 +1133,17 @@ impl Flight {
     pub fn step_external(&mut self, mut st: EnvState, thrust: f64) -> Control {
         st.toff = self.st.toff;
         st.ticks = self.st.ticks + 1;
+        // the Brakes action group is what the guidance commanded; the flap moves as in the game
+        // (ModuleAeroSurface: actuatorSpeed deg/s toward deployAngle), as ksp-core's tick does
+        st.brakes = self.st.brakes;
+        st.brake_deflection = self.st.brake_deflection;
+        let spec = *self.truth();
+        if spec.n_aero_surf > 0 {
+            let a = &spec.aero_surf[0];
+            let lim = 1.5 * a.ctrl_surface_range;
+            let tgt = if st.brakes { a.deploy_angle.clamp(-lim, lim) } else { 0.0 };
+            st.brake_deflection = sim::move_towards(st.brake_deflection, tgt as f32, (a.actuator_speed * FIXED_DT) as f32);
+        }
         if st.toff.is_nan() {
             // ksp-core caches the GetAtmoThermalStats offset on its first tick
             let mut tmp = st;

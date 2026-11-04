@@ -539,7 +539,7 @@ pub fn aero_surface_force(s: &crate::vessel::AeroSurfaceSpec, q: Quat, v_point: 
 /// `omega`: body spin when the state is in the inertial frame (air-relative velocities).
 /// Kept out of line so vessels without aero surfaces pay nothing in `tick`.
 #[inline(never)]
-fn aero_surfaces(spec: &VesselSpec, st: &EnvState, v_com: V3, r_com: V3, omega: Option<V3>, atm: &atmo::AtmState) -> (V3, V3) {
+pub fn aero_surfaces(spec: &VesselSpec, st: &EnvState, v_com: V3, r_com: V3, omega: Option<V3>, atm: &atmo::AtmState) -> (V3, V3) {
     let (mut force, mut torque) = (V3::ZERO, V3::ZERO);
     let fl = AeroSurfaceFlap::new(st.brake_deflection);
     let mut mach_cache = (std::ptr::null::<crate::curve::Key>(), 0.0, 0.0);
