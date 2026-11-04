@@ -17,7 +17,10 @@ use crate::parts::{PartDef, N_RES, RES_DENSITY};
 pub const MAX_PARTS: usize = 24;
 pub const MAX_ENGINES: usize = 4;
 pub const MAX_LEGS: usize = 6;
-pub const MAX_HULL: usize = 24;
+/// 64 at most: `EnvState::hull_touch` is a u64 bitmask (the CUDA kernel's is 32 bits, gpu.rs)
+pub const MAX_HULL: usize = 48;
+/// thrust transforms per engine (Mammoth: 4)
+pub const MAX_NOZZLES: usize = 4;
 pub const MAX_ISP_KEYS: usize = 8;
 pub const MAX_AERO_SURFACES: usize = 8;
 
@@ -145,6 +148,37 @@ pub struct EngineSpec {
     pub dir: V3,
     /// root-frame gimbal pivot: the thrust point swings about it with the deflection
     pub pivot: V3,
+    /// engines with several thrust transforms (`parts::thrust_transforms`): root-frame nozzle
+    /// positions, each taking 1/n of the thrust (`pos` / `pivot` are then their centroid, and
+    /// every nozzle is its own gimbal pivot), and ModuleGimbal.GimbalRotation's roll mix per
+    /// nozzle: +-1 / 0 added to the pitch / yaw channels from the nozzle's offset to the reference
+    /// transform (root origin) beyond minRollOffset 0.1 m. n_nozzles = 0: single nozzle at `pos`.
+    pub n_nozzles: u32,
+    pub nozzles: [V3; MAX_NOZZLES],
+    pub nozzle_roll: [[f64; 2]; MAX_NOZZLES],
+}
+
+impl EngineSpec {
+    /// Set the thrust transforms of a multi-nozzle engine (root frame): `pos` and `pivot` become
+    /// their centroid (the equivalent single nozzle without roll input).
+    pub fn set_nozzles(&mut self, np: &[V3]) {
+        assert!(np.len() <= MAX_NOZZLES);
+        self.n_nozzles = np.len() as u32;
+        let mut c = V3::ZERO;
+        for (j, &q) in np.iter().enumerate() {
+            self.nozzles[j] = q;
+            // ModuleGimbal.GimbalRotation, `vector` = ReferenceTransform.InverseTransformPoint:
+            // Unity x > minRollOffset adds roll to pitch (sim x is mirrored), z > it to yaw
+            let roll = |u: f64| if u > 0.1 { 1.0 } else if u < -0.1 { -1.0 } else { 0.0 };
+            self.nozzle_roll[j] = [roll(-q.x), roll(q.z)];
+            c += q;
+        }
+        if !np.is_empty() {
+            c = c / np.len() as f64;
+            self.pos = c;
+            self.pivot = c;
+        }
+    }
 }
 
 pub use crate::wheel::LegSpec;
@@ -406,6 +440,14 @@ impl VesselSpec {
                 for (j, key) in e.atmosphere_curve.keys.iter().enumerate() {
                     es.isp_keys[j] = *key;
                 }
+                if let Some(tt) = crate::parts::thrust_transforms(d.name) {
+                    assert!(tt.len() <= MAX_NOZZLES);
+                    // per-nozzle gimbal lag would need per-nozzle state (ModuleGimbal lerps each
+                    // transform's actuation); no stock multi-nozzle engine in the catalog has it
+                    assert!(e.gimbal_response_speed.is_none(), "{}: multi-nozzle gimbal response not modelled", d.name);
+                    let np: Vec<V3> = tt.iter().map(|t| p.pos + p.rot.rotate(*t)).collect();
+                    es.set_nozzles(&np);
+                }
                 // ModuleEngines.SetupPropellant: mixtureDensity = sum density_i * ratio_i
                 let mix: f64 = e.propellants.iter().map(|(r, ratio)| RES_DENSITY[*r as usize] * ratio).sum();
                 for (r, ratio) in &e.propellants {
@@ -456,6 +498,9 @@ impl VesselSpec {
                 }
                 for c in &d.crash_sensors {
                     s.add_hull(i, p.pos + p.rot.rotate(*c), d.crash_tolerance, bf, true);
+                }
+                for c in crate::parts::passive_contacts(d.name) {
+                    s.add_hull(i, p.pos + p.rot.rotate(*c), d.crash_tolerance, bf, false);
                 }
             }
         }

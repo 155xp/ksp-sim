@@ -198,3 +198,180 @@ lift, and they say nothing about the aero torque (kOS steering held the attitude
   the log. Compare each airbrake's `aero_surface_force` with the logged `dragForce` per tick, the
   way `examples/part_aero_check.rs` does for cube drag. Compare the angular acceleration of
   unsteered stretches (SAS off) with the sim's torque.
+
+## 3.75 m heavy booster parts in ksp-core
+
+These are the parts of the heavy booster (`guidance` `ingame::heavy_craft`): Mk7 nose /
+RC-L01 / large reaction wheel / Z-4K / ADTP-2-3 / S3-14400 (root) / S3-7200 / Mammoth, six LT-2
+legs and eight airbrakes, 22 parts. They are transcribed from the demo install
+(`~/ksp-demo/KSP`) the same way as the earlier catalog parts. `parts::by_name` serves them, so
+`guidance` `partlib::load` now returns these definitions for all eight names.
+
+### What was transcribed
+
+| name | fn | cfg | mass t | crash m/s | nodes (size) | resources | modules simulated |
+|---|---|---|---|---|---|---|---|
+| `rocketNoseCone_v2` | `nose_cone_mk7` | Aero/cones/protectiveRocketNoseMk7_v2.cfg | 0.2 | 10 | bottom 0 (2) | – | – (angularDrag 0.5) |
+| `probeStackLarge` | `probe_stack_large` | Command/probeStackLarge | 0.5 | 9 | ±0.19 (2) | EC 30 | wheel 1.5/1.5/1.5, 0.15 EC/s |
+| `asasmodule1-2` | `adv_sas_module_large` | Command/advancedSasModuleLarge | 0.2 | 9 | ±0.25 (2) | – | wheel 30/30/30, 0.6 EC/s |
+| `batteryBankLarge` | `battery_bank_large` | Electrical/z-4kBattery | 0.2 | 8 | +0.11 / −0.142 (2) | EC 4000 | – (angularDrag 1) |
+| `Size3To2Adapter_v2` | `adapter_s3_s2` | Structural/Size3To2Adapter_v2 | 1.875 | 6 | +1.15017 (2) / −1.1 (3) | LF 1350 Ox 1650 | – |
+| `Size3LargeTank` | `s3_tank_14400` | FuelTank/Size3Tanks/large.cfg | 9 | 6 | ±3.74 (3) | LF 6480 Ox 7920 | – |
+| `Size3MediumTank` | `s3_tank_7200` | FuelTank/Size3Tanks/medium.cfg | 4.5 | 6 | +1.931 / −1.937 (3) | LF 3240 Ox 3960 | – |
+| `Size3EngineCluster` | `mammoth` | Engine/Size3EngineCluster/part.cfg | 15 | 20 | top +1.527248 (3) only | – | ModuleEnginesFX, ModuleGimbal |
+
+None of these cfgs sets CoM, CoP or CoL offsets. All are rescaleFactor 1.
+
+**Drag cubes.** Where `ModulePartVariants` is present it has `useMultipleDragCubes = false`, so
+each part uses one "Default" cube from PartDatabase.cfg. Two parts carry their own `DRAG_CUBE` in
+the part cfg: the ADTP-2-3 and asasmodule1-2. For those, PartLoader puts the cfg cube into the
+prefab at full precision and only writes a rounded copy to PartDatabase. Flight parts clone the
+prefab's serialized `DragCubeList`, so ksp-core uses the cfg value. The test checks the
+PartDatabase copy against it to 4 significant digits.
+
+**Mammoth engine.** maxThrust 4000, minThrust 0, Isp 315 (vacuum) / 295 (1 atm) / 0.001 at
+12 atm, LF:Ox 0.9:1.1, ignitionThreshold 0.1. No `useEngineResponseTime`, so throttle is
+instantaneous. ModuleGimbal has gimbalRange 2, no per-axis ranges and no `useGimbalResponseSpeed`,
+so the gimbal is instantaneous. ModuleAlternator (12 EC/s at full thrust) is not simulated.
+
+**Thrust check.** Vacuum 4000 kN; sea level 3746.0 kN. The wet booster is 155.475 t
+(32.475 t dry + 123 t propellant), so sea-level TWR is 2.456.
+
+### How the Mammoth's four nozzles are modelled
+
+**What the game does:**
+- Both `thrustVectorTransformName` and `gimbalTransformName` are `obj_gimbal`, and the model has
+  four of them. Their Unity positions are (±0.76, −1.14, ±1.38) in the part frame. Forward is −Y
+  (exhaust down), right is −X, up is −Z.
+- So each nozzle's thrust transform *is* its gimbal transform. The thrust point never swings
+  about a separate pivot.
+- `ModuleEngines.OnLoad` gives each transform `thrustTransformMultipliers` = 1/4 (there is no
+  `transformMultipliers` node). `ThrustUpdate` applies `finalThrust / 4` at each transform.
+- `ModuleGimbal.FixedUpdate` runs `GimbalRotation` per transform:
+  - pitch and yaw are sign-flipped when the CoM is below the transform;
+  - when the transform sits more than `minRollOffset` = 0.1 m off the reference transform's
+    axis, roll is added to pitch (offset in x) and to yaw (offset in z);
+  - each channel is clamped to ±1 in the gimbal frame and multiplied by 2°.
+- The gimbal frames are axis-aligned, so that clamp is a clamp of the vessel-frame channels.
+
+**What ksp-core does:**
+- `EngineDef` holds the nozzle centroid (0, −1.14, 0), with pivot = thrust point.
+- `parts::thrust_transforms("Size3EngineCluster")` returns the four positions.
+- `VesselSpec::compile` copies them into `EngineSpec::{n_nozzles, nozzles, nozzle_roll}` through
+  `EngineSpec::set_nozzles`.
+- `sim::tick` loops over the nozzles when `n_nozzles > 0`, using the rule above, with the root
+  origin as the reference transform (the existing gimbal model's assumption).
+- The single-nozzle path is unchanged. All 9 trace regressions pass unchanged against
+  `data/traces`.
+
+**What the tests show (`parts::tests::mammoth_gimbal_four_nozzles`):**
+- With no roll input every nozzle deflects alike. Four equal parallel forces equal one at the
+  centroid, so the result matches a single centroid nozzle exactly (to 1e-9) for any pitch/yaw.
+- Pitch, yaw and roll torques have the same sign as the reaction wheels' for the same input.
+- Roll torque is T · (0.76 + 1.38) · sin 2°, about 299 kN·m at 4000 kN. That is about 10 times
+  the two wheels together (31.5 kN·m). The single-nozzle equivalent has no roll authority.
+- A roll command saturates the channel on one side when pitch is also full.
+
+**Guidance gap.** `attitude.rs` models gimbal effectiveness from `pos` and `pivot` only, so it
+does not know about this roll authority. `EngineSpec::nozzles` and `nozzle_roll` have what it
+needs.
+
+**Trace replay.** `trace::spec_from_geometry` now builds one engine per part from all of its
+`thrustTransform` lines:
+- one line: same behaviour as before;
+- several lines: `set_nozzles` with the dumped positions, and direction = mean of −forward.
+
+### Hull points, contacts and limits
+
+- **Hull radii.** These are the bottom-face axis extents of each part's primary collider, read
+  offline from the `.mu` files (`PartReader` format). This is the same quantity as the dumped
+  FL-T400 0.604 / Mk1 0.625 / Swivel 0.316; the offline reader reproduces those three exactly.
+  Values: S3 tanks 1.81111, ADTP-2-3 1.865699, RC-L01 / Z-4K / nose 1.25, asasmodule1-2 1.207407.
+- **Mammoth contacts.** `Part.collider` is `bodyCollider` (mesh, y −1.566 … 1.524).
+  - Four crash sensors sit on its bottom face (radius 1.287146 at y −1.565684).
+  - The four `engineCollider` capsules (r 0.61, height 3.16, vertical, centres
+    (±0.759, −1.136, ±1.39)) are separate colliders. Like the Swivel's bell, they push on the
+    ground but never crash the engine. Their lowest points, y −2.716, come from
+    `parts::passive_contacts`, which `VesselSpec::compile` adds with `hull_crash = false`.
+- **Nose cone.** `PartLoader.GetPartCollider` runs on the prefab with both MODELs loaded. It
+  picks orangeNoseCone's `foamCol`, which the default White variant then deactivates. So the
+  cone's ring is `hull_crash = false`: it pushes but cannot crash the cone.
+- **Limits.**
+  - `MAX_HULL` 24 → 48, and `EnvState::hull_touch` u32 → u64. The heavy booster needs 43 hull
+    points: nose 4, six stack parts × 5, Mammoth 1 + 4 + 4.
+  - New `MAX_NOZZLES` = 4.
+  - `MAX_PARTS` 24, `MAX_ENGINES` 4, `MAX_LEGS` 6 and `MAX_AERO_SURFACES` 8 are unchanged; this
+    craft uses 22 / 1 / 6 / 8 of them.
+  - `gpu::pack` now asserts `n_hull <= 32` (cuda_tick.cu keeps the contact mask in an
+    `unsigned int`) and no multi-nozzle engines. The CUDA kernel therefore cannot run this craft.
+- **Sim pad and hop (`parts::tests::heavy_booster_pad_and_hop`).**
+  - The booster settles to LANDED on the six legs (0.21 m static compression, no hull contact).
+  - A 3 s full-throttle hop then tracks thrust/mass − g within 0.35 % per tick.
+
+### Joint break forces
+
+`parts::joint_break_force` implements `PartJoint.Create` /
+`SetBreakingForces`:
+
+min(breakingForce) · (size + 1) · (stack 2 | srf 0.8) · jointBreakForceFactor 50
+
+- Part default `breakingForce` is 22. Node size is the smaller of the two nodes.
+- Nodes of size ≥ 2 get 3 internal joints that split this force. ksp-core stores the sum.
+- The formula reproduces both dumped values: 4400 (size-1 stack) and 4000 (LT-2 on the FL-T400).
+- For this tree: 2.5 m joints 6600 kN, ADTP-2-3 → S3-14400 80000, S3-7200 → S3-14400 120000,
+  Mammoth → S3-7200 120000. These values are pair-dependent.
+- The TraceLogger dump logs only `PartJoint.Joint` = `joints[0]`. `trace.rs` multiplies by an
+  optional `joints=` field, so adding `" joints=" + p.attachJoint.joints.Count` to the `joint`
+  line in TraceLogger.cs makes replays match.
+
+### Not measured in game (from cfg / decomp / .mu only)
+
+1. Mammoth nozzle positions (.mu) and the per-nozzle roll mix (decomp). No trace shows the
+   Mammoth's gimbal torque yet; the Swivel's measured torque coefficient was 0.867.
+2. All hull radii, the Mammoth crash sensors and nozzle-capsule contacts (.mu colliders, not the
+   SimHarness collider dump), and the nose cone's `hull_crash = false` (decomp reading).
+3. Joint break forces 6600 / 80000 / 120000 (formula). Only size-1 nodes have been dumped.
+4. Drag cubes. They come from the demo install's PartDatabase, and cube generation depends on
+   the renderer.
+5. Inertia. The sim uses its usual box-from-cube approximation; the game derives it from the
+   colliders (`rb.inertiaTensor` is in the dump).
+6. Not simulated: ModuleAlternator; ModuleCommand's 0.08 EC/s on the RC-L01.
+7. Two catalog joint values are wrong for this craft:
+   - `lt2_leg()` carries the FL-T400's 4000 kN; on the S3-7200 the game gives
+     min(80, 300) · 2 · 0.8 · 50 = 6400.
+   - `airbrake()` has 4400; the game gives min(22, 400) · 2 · 0.8 · 50 = 1760.
+
+   Both only matter for the opt-in joint-break check.
+
+### The short in-game test that would measure them (`HeavyPadHop`)
+
+Fly the heavy craft (`ingame/make_demo_craft.py --heavy`) on the pad with TraceLogger running
+(SimHarness CSV + geometry dumps at start and end). Run it at 1x warp, SAS off, with raw
+kOS `SHIP:CONTROL` inputs.
+
+1. **Pad settle, 10 s at throttle 0.** The start and end geometry dumps give:
+   - `collider … ext=` support points: hull radii, Mammoth `bodyCollider` / `engineCollider`
+     extents, the nose cone's active collider and which one is `Part.collider`;
+   - four `thrustTransform` and four `gimbalTransform` lines;
+   - joint `breakForce` (with `joints=` added), `rb.inertiaTensor`, deployed `wheelCollider`.
+
+   Compare with `trace::spec_from_geometry` against `VesselSpec::compile`. Also compare the
+   static leg compression (`wc*_compr`) and the CoM height with the sim's
+   `heavy_booster_pad_and_hop` settle.
+2. **Hop, 3 s at throttle 0.5** (TWR about 1.23, 2.2 m/s², about 10 m). Compare `e0_thrust`,
+   `e0_isp`, mass flow (`lf` / `ox`) and vertical acceleration per tick, as in the
+   `powered_hover` trace test.
+3. **Gimbal steps** in a kOS vertical-speed hold at about 15 m, with both reaction wheels'
+   torque toggled off (`ModuleReactionWheel` "Toggle Torque"). Input steps of 1 s each, 1 s
+   apart:
+   - pitch +0.5,
+   - yaw +0.5,
+   - roll +0.5,
+   - roll −0.5,
+   - pitch +1 with roll +1 (the clamp case).
+
+   Compare the logged `g0_ax/ay/az` and the angular acceleration from `w_*` with the sim torque
+   in a `trace::state_at` replay. Roll is the new physics. TraceLogger only logs
+   `thrustTransforms[0]` per tick (`e0_dir` / `e0_pos`), so per-nozzle `localRotation` columns
+   would make each nozzle's deflection directly checkable.
+4. **Descent** at −2 m/s to touchdown, then the end-of-test dump.

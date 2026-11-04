@@ -415,6 +415,248 @@ pub fn decoupler_td12() -> PartDef {
     )
 }
 
+/// `PartJoint.Create` breakForce (kN) of a joint between parts with cfg `breakingForce` `bf_a`,
+/// `bf_b` (Part default 22) over an attach node of `size` (the smaller of the two nodes' sizes):
+/// min(bf) * (size + 1) * (stackNodeFactor 2 | srfNodeFactor 0.8) * jointBreakForceFactor 50
+/// (Physics.cfg). Nodes of size >= 2 get 3 internal ConfigurableJoints that split this force;
+/// the value returned is their sum, the single-joint equivalent for a load shared evenly.
+/// Reproduces the dumped 4400 (size-1 stack, both 22) and 4000 (LT-2 80 on FL-T400 50, srf).
+pub fn joint_break_force(bf_a: f64, bf_b: f64, size: u32, surface: bool) -> f64 {
+    bf_a.min(bf_b) * (size as f64 + 1.0) * if surface { 0.8 } else { 2.0 } * 50.0
+}
+
+/// `Part.breakingForce` default (no `breakingForce` in the cfg).
+pub const DEFAULT_BREAKING_FORCE: f64 = 22.0;
+
+// 3.75 m booster parts. Cubes: PartDatabase.cfg of the demo install, except where the part cfg
+// carries its own DRAG_CUBE (Size3To2Adapter_v2, asasmodule1-2): PartLoader loads that into the
+// prefab at full precision and only writes a rounded copy to PartDatabase (PartLoader
+// CompileParts: SetDatabaseConfig when the prefab already has cubes), and flight parts clone the
+// prefab's serialized DragCubeList. Hull radii are the bottom-face axis extents of each part's
+// primary collider read from its .mu model (PartReader.ReadChild format), the quantity the
+// measured FL-T400 0.604 / Mk1 pod 0.625 / Swivel 0.316 are; not yet confirmed by an in-game
+// collider dump. Joint break forces: `joint_break_force` for the joint to the parent in the heavy
+// booster (guidance ingame::heavy_craft: root S3-14400, adapter and the 2.5 m parts above it, the
+// S3-7200 and Mammoth below); the pair-dependent value differs in other trees.
+
+/// Joint to the part below over a size-2 node between two default-22 parts (3 joints, 6600 kN;
+/// the Z-4K's to the adapter too: min(22, 200)).
+const JBF_SIZE2: f64 = 22.0 * 3.0 * 2.0 * 50.0;
+
+/// Protective Rocket Nose Cone Mk7 (2.5 m). Aero/cones/protectiveRocketNoseMk7_v2.cfg (two MODEL
+/// nodes: orangeNoseCone, rocketNoseCone_v2; default variant White shows `nose` + `collider`).
+pub fn nose_cone_mk7() -> PartDef {
+    PartDef {
+        name: "rocketNoseCone_v2",
+        mass: 0.2,
+        com_offset: V3::ZERO,
+        cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
+        angular_drag: 0.5,
+        crash_tolerance: 10.0,
+        body_lift: true,
+        cube: cube("Default, 4.218,0.4841,1.345, 4.218,0.5846,1.345, 4.853,0.3728,1.976, 4.853,0.8912,0.3712, 4.218,0.483,1.345, 4.218,0.5811,1.345, 0,0.9061,0, 2.5,2.358,2.5"),
+        node_top: None,
+        node_bottom: Some((V3::ZERO, v3(0.0, -1.0, 0.0))),
+        resources: vec![],
+        engine: None,
+        reaction_wheel: None,
+        leg: None,
+        // `collider` mesh: bottom face y -0.027, axis extents 1.25
+        hull_radius: Some(1.25),
+        joint_break_force: JBF_SIZE2,
+        // PartLoader.GetPartCollider runs on the prefab with every MODEL loaded: the first collider
+        // is orangeNoseCone's foamCol, which the White variant then deactivates (GAMEOBJECTS
+        // foamCol = false). The active `collider` is not Part.collider, so it pushes but cannot
+        // crash the cone. Decomp reading, not yet seen in game.
+        hull_crash: false,
+        crash_sensors: vec![],
+    }
+}
+
+/// RC-L01 probe core. Command/probeStackLarge/probeStackLarge.cfg (nodes size 2; ModuleCommand's
+/// 0.08 EC/s is not simulated).
+pub fn probe_stack_large() -> PartDef {
+    PartDef {
+        hull_radius: Some(1.25),
+        joint_break_force: JBF_SIZE2,
+        ..stack_part(
+            "probeStackLarge", 0.5, 2.0, 9.0, 0.19,
+            "Default, 0.9721,0.7321,1.4, 0.9721,0.7326,1.4, 5.261,0.9806,0.1842, 5.261,0.9795,0.1842, 0.9997,0.7308,1.375, 0.9997,0.7297,1.42, -1.748E-09,2.384E-09,-0.02, 2.611,0.38,2.651",
+            vec![(Res::ElectricCharge, 30.0, 30.0)],
+            Some(ReactionWheelDef { pitch_torque: 1.5, yaw_torque: 1.5, roll_torque: 1.5, ec_rate: 0.15, torque_response_speed: 30.0 }),
+        )
+    }
+}
+
+/// Advanced Reaction Wheel Module, Large. Command/advancedSasModuleLarge/advSasModuleLarge.cfg
+/// (cfg DRAG_CUBE).
+pub fn adv_sas_module_large() -> PartDef {
+    PartDef {
+        hull_radius: Some(1.207407),
+        joint_break_force: JBF_SIZE2,
+        ..stack_part(
+            "asasmodule1-2", 0.2, 2.0, 9.0, 0.25,
+            "Default, 1.245117,0.7806778,1.344706, 1.245117,0.7806778,1.344706, 4.643318,0.9183766,0.5737258, 4.643318,0.9590334,0.5462748, 1.245117,0.774645,1.344706, 1.245117,0.774645,1.344706, 0,0,0, 2.5,0.5000004,2.5",
+            vec![],
+            Some(ReactionWheelDef { pitch_torque: 30.0, yaw_torque: 30.0, roll_torque: 30.0, ec_rate: 0.6, torque_response_speed: 30.0 }),
+        )
+    }
+}
+
+/// Z-4K battery bank. Electrical/z-4kBattery/z-4kBattery.cfg (nodes +0.11 / -0.142).
+pub fn battery_bank_large() -> PartDef {
+    PartDef {
+        node_top: Some((v3(0.0, 0.11, 0.0), v3(0.0, 1.0, 0.0))),
+        node_bottom: Some((v3(0.0, -0.142, 0.0), v3(0.0, -1.0, 0.0))),
+        hull_radius: Some(1.25),
+        joint_break_force: JBF_SIZE2,
+        ..stack_part(
+            "batteryBankLarge", 0.2, 1.0, 8.0, 0.0,
+            "Default, 0.6287,0.7858,1.378, 0.6287,0.7857,1.378, 4.872,0.9759,0.2241, 4.872,0.9767,0.2259, 0.6221,0.7782,1.345, 0.6221,0.7731,1.345, 0,-0.01703,0, 2.633,0.25,2.5",
+            vec![(Res::ElectricCharge, 4000.0, 4000.0)],
+            None,
+        )
+    }
+}
+
+/// Kerbodyne ADTP-2-3 (3.75 m -> 2.5 m, carries fuel). Structural/Size3To2Adapter_v2/
+/// Size2to3_v2.cfg (top node size 2, bottom size 3; breakingForce 200; cfg DRAG_CUBE).
+pub fn adapter_s3_s2() -> PartDef {
+    PartDef {
+        node_top: Some((v3(0.0, 1.15017, 0.0), v3(0.0, 1.0, 0.0))),
+        node_bottom: Some((v3(0.0, -1.1, 0.0), v3(0.0, -1.0, 0.0))),
+        // AdapterCol bottom face y -1.1037: x extent 1.8751, z 1.8657 (polygon); the smaller
+        hull_radius: Some(1.865699),
+        // to the S3-14400 below (the root): size 3, min(200, 400)
+        joint_break_force: joint_break_force(200.0, 400.0, 3, false),
+        ..stack_part(
+            "Size3To2Adapter_v2", 1.875, 2.0, 6.0, 0.0,
+            "Default, 7.344658,0.7515181,1.980434, 7.344658,0.7516301,1.980434, 11.00077,0.4258759,2.35452, 11.00077,0.7470945,0.1906485, 7.3984,0.7432775,1.971122, 7.3984,0.7581861,1.971122, -1.907349E-06,0,0, 3.776463,2.301678,3.757764",
+            vec![(Res::LiquidFuel, 1350.0, 1350.0), (Res::Oxidizer, 1650.0, 1650.0)],
+            None,
+        )
+    }
+}
+
+/// Kerbodyne S3-14400. FuelTank/Size3Tanks/large.cfg (breakingForce 400; base variant
+/// BlackAndWhite, useMultipleDragCubes = false).
+pub fn s3_tank_14400() -> PartDef {
+    PartDef {
+        // COL_L: 24-gon, axis extents 1.8111
+        hull_radius: Some(1.81111),
+        // the heavy booster's root; this is the joint to a like part, min(400, 400) over size 3
+        joint_break_force: joint_break_force(400.0, 400.0, 3, false),
+        ..stack_part(
+            "Size3LargeTank", 9.0, 2.0, 6.0, 3.74,
+            "Default, 28.42,0.7567,2.051, 28.42,0.7555,2.051, 11,0.8538,0.516, 11,0.8535,0.516, 29.72,0.7815,1.936, 29.72,0.781,1.936, 0,-3.052E-05,0, 3.984,7.54,3.75",
+            vec![(Res::LiquidFuel, 6480.0, 6480.0), (Res::Oxidizer, 7920.0, 7920.0)],
+            None,
+        )
+    }
+}
+
+/// Kerbodyne S3-7200. FuelTank/Size3Tanks/medium.cfg (nodes +1.931 / -1.937; breakingForce 300).
+pub fn s3_tank_7200() -> PartDef {
+    PartDef {
+        node_top: Some((v3(0.0, 1.931, 0.0), v3(0.0, 1.0, 0.0))),
+        node_bottom: Some((v3(0.0, -1.937, 0.0), v3(0.0, -1.0, 0.0))),
+        hull_radius: Some(1.81111),
+        // to the S3-14400 above: size 3, min(300, 400)
+        joint_break_force: joint_break_force(300.0, 400.0, 3, false),
+        ..stack_part(
+            "Size3MediumTank", 4.5, 2.0, 6.0, 0.0,
+            "Default, 14.7,0.7716,1.921, 14.7,0.7726,1.921, 10.92,0.8552,0.5019, 10.92,0.855,0.5019, 14.7,0.7714,1.936, 14.7,0.7714,1.936, 0,-0.002999,0, 3.75,3.928,3.75",
+            vec![(Res::LiquidFuel, 3240.0, 3240.0), (Res::Oxidizer, 3960.0, 3960.0)],
+            None,
+        )
+    }
+}
+
+/// The Mammoth's four `obj_gimbal` transforms (= its ModuleEnginesFX thrustVectorTransformName
+/// and ModuleGimbal gimbalTransformName), part frame (sim, x-mirrored), from
+/// Size3EngineCluster.mu: Unity (+-0.76, -1.14, +-1.38), forward -Y (exhaust down), right -X,
+/// up -Z. Axis-aligned, so ModuleGimbal's per-axis clamp in the gimbal frame is a clamp of the
+/// vessel-frame pitch / yaw channels.
+pub const MAMMOTH_NOZZLES: [V3; 4] = [v3(0.76, -1.14, 1.38), v3(-0.76, -1.14, 1.38), v3(-0.76, -1.14, -1.38), v3(0.76, -1.14, -1.38)];
+
+/// S3 KS-25x4 "Mammoth". Engine/Size3EngineCluster/part.cfg: mass 15, crashTolerance 20, only a
+/// top stack node (size 3), ModuleEnginesFX (maxThrust 4000, no useEngineResponseTime), ModuleGimbal
+/// (gimbalRange 2, no useGimbalResponseSpeed: instantaneous), ModuleAlternator (12 EC/s at full
+/// thrust; not simulated). Single "Default" cube (no ModuleJettison).
+///
+/// Thrust transforms: four (`MAMMOTH_NOZZLES`, `thrust_transforms`), each taking
+/// thrustTransformMultipliers = 1/4 (ModuleEngines.OnLoad default). The EngineDef carries their
+/// centroid: with no roll input every nozzle deflects alike, and four equal parallel forces at
+/// the nozzles equal one force at the centroid (same net force and torque, exactly). The gimbal
+/// transform is the thrust transform, so the thrust point does not swing (pivot = thrust point).
+/// Roll, which ModuleGimbal.GimbalRotation adds per nozzle from its offset, needs the nozzle
+/// positions: `VesselSpec::compile` copies them into `EngineSpec::nozzles`.
+pub fn mammoth() -> PartDef {
+    PartDef {
+        name: "Size3EngineCluster",
+        mass: 15.0,
+        com_offset: V3::ZERO,
+        cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
+        angular_drag: 2.0,
+        crash_tolerance: 20.0,
+        body_lift: true,
+        cube: cube("Default, 13.76,0.8137,1.976, 13.76,0.8137,1.976, 12.47,0.8767,3.067, 12.47,0.7577,2.59, 12.72,0.7565,2.1, 12.72,0.7576,2.1, 9.537E-07,-0.5307,0, 3.768,4.144,4.017"),
+        node_top: Some((v3(0.0, 1.527248, 0.0), v3(0.0, 1.0, 0.0))),
+        node_bottom: None,
+        resources: vec![],
+        engine: Some(EngineDef {
+            max_thrust: 4000.0,
+            min_thrust: 0.0,
+            atmosphere_curve: Curve::from_cfg_lines(["0 315", "1 295", "12 0.001"]),
+            propellants: vec![(Res::LiquidFuel, 0.9), (Res::Oxidizer, 1.1)],
+            ignition_threshold: 0.1,
+            response: None,
+            gimbal_range_deg: 2.0,
+            gimbal_response_speed: None,
+            thrust_pos: v3(0.0, -1.14, 0.0),
+            thrust_dir: v3(0.0, 1.0, 0.0),
+            gimbal_pivot: v3(0.0, -1.14, 0.0),
+        }),
+        reaction_wheel: None,
+        leg: None,
+        hull_radius: None,
+        // to the S3-7200 above: size 3, min(400, 300)
+        joint_break_force: joint_break_force(400.0, 300.0, 3, false),
+        // Part.collider is bodyCollider (mesh, y -1.566 .. 1.524, bottom-face radius 1.287); the
+        // four engineCollider capsules (r 0.61, height 3.16, vertical, down to y -2.716) are its
+        // children: they take the ground contact (`passive_contacts`) but cannot destroy the part
+        hull_crash: true,
+        crash_sensors: vec![
+            v3(-1.287146, -1.565684, 0.0),
+            v3(1.287146, -1.565684, 0.0),
+            v3(0.0, -1.565684, 1.287146),
+            v3(0.0, -1.565684, -1.287146),
+        ],
+    }
+}
+
+/// Thrust transforms of engines that have more than one (part frame, sim x-mirrored); each takes
+/// an equal share of the thrust. Kept out of `EngineDef` so struct-literal users are unaffected.
+pub fn thrust_transforms(name: &str) -> Option<&'static [V3]> {
+    match name {
+        "Size3EngineCluster" => Some(&MAMMOTH_NOZZLES),
+        _ => None,
+    }
+}
+
+/// Contact points on colliders other than `Part.collider` (part frame, sim x-mirrored): they
+/// push on the ground but never crash the part. Mammoth: the lowest points of the four
+/// engineCollider capsules (centre Unity (+-0.759, -1.136, +-1.39), half-height 1.58).
+pub fn passive_contacts(name: &str) -> &'static [V3] {
+    const MAMMOTH: [V3; 4] = [v3(0.759, -2.716, 1.39), v3(-0.759, -2.716, 1.39), v3(-0.759, -2.716, -1.39), v3(0.759, -2.716, -1.39)];
+    match name {
+        "Size3EngineCluster" => &MAMMOTH,
+        _ => &[],
+    }
+}
+
 /// `ModuleAeroSurface` (: ModuleControlSurface : ModuleLiftingSurface) as the game sets it up.
 ///
 /// Frames are the sim's part frame (Unity part frame mirrored in x). Two decomp facts decide the
@@ -532,6 +774,14 @@ pub fn by_name(name: &str) -> Option<PartDef> {
         "advSasModule" => adv_sas_module(),
         "Decoupler_1" => decoupler_td12(),
         "airbrake1" => airbrake(),
+        "Size3EngineCluster" => mammoth(),
+        "Size3LargeTank" => s3_tank_14400(),
+        "Size3MediumTank" => s3_tank_7200(),
+        "Size3To2Adapter_v2" => adapter_s3_s2(),
+        "probeStackLarge" => probe_stack_large(),
+        "asasmodule1-2" => adv_sas_module_large(),
+        "batteryBankLarge" => battery_bank_large(),
+        "rocketNoseCone_v2" => nose_cone_mk7(),
         _ => return None,
     })
 }
@@ -671,7 +921,341 @@ mod tests {
                 || n.get("name") == Some(def.name)).and_then(|n| n.node("DRAG_CUBE").cloned());
             let dc = dc.expect(def.name);
             let found = dc.get_all("cube").filter_map(DragCube::parse).find(|(n, _)| n == cube_name).unwrap().1;
-            assert_eq!(found.mirrored_x(), def.cube, "{}", def.name);
+            if let Some(own) = p.node("DRAG_CUBE") {
+                // the part cfg's own cube is what the prefab (and so every flight part) carries;
+                // PartDatabase holds a 4-significant-digit copy of it
+                let c = own.get_all("cube").filter_map(DragCube::parse).find(|(n, _)| n == cube_name).unwrap().1;
+                assert_eq!(c.mirrored_x(), def.cube, "{}", def.name);
+                let flat = |d: &DragCube| [&d.area[..], &d.drag[..], &d.depth[..], &[d.center.x, d.center.y, d.center.z, d.size.x, d.size.y, d.size.z][..]].concat();
+                for (x, y) in flat(&c).iter().zip(flat(&found)) {
+                    assert!((x - y).abs() <= 5e-4 * x.abs() + 1e-9, "{}: cfg {x} vs PartDatabase {y}", def.name);
+                }
+            } else {
+                assert_eq!(found.mirrored_x(), def.cube, "{}", def.name);
+            }
         }
+    }
+
+    fn demo_install() -> Option<std::path::PathBuf> {
+        let k = std::env::var("KSP_DEMO").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::Path::new(&std::env::var("HOME").unwrap_or_default()).join("ksp-demo/KSP"));
+        k.join("PartDatabase.cfg").exists().then_some(k)
+    }
+
+    fn module<'a>(p: &'a cfg::Node, name: &str) -> Option<&'a cfg::Node> {
+        p.nodes_named("MODULE").find(|n| n.get("name") == Some(name))
+    }
+
+    type PartFn = fn() -> PartDef;
+    const HEAVY: [(&str, PartFn); 8] = [
+        ("Engine/Size3EngineCluster/part.cfg", mammoth),
+        ("FuelTank/Size3Tanks/large.cfg", s3_tank_14400),
+        ("FuelTank/Size3Tanks/medium.cfg", s3_tank_7200),
+        ("Structural/Size3To2Adapter_v2/Size2to3_v2.cfg", adapter_s3_s2),
+        ("Command/probeStackLarge/probeStackLarge.cfg", probe_stack_large),
+        ("Command/advancedSasModuleLarge/advSasModuleLarge.cfg", adv_sas_module_large),
+        ("Electrical/z-4kBattery/z-4kBattery.cfg", battery_bank_large),
+        ("Aero/cones/protectiveRocketNoseMk7_v2.cfg", nose_cone_mk7),
+    ];
+
+    /// The 3.75 m booster parts against the demo install's cfgs and PartDatabase (skipped without
+    /// it), including the fields `check_parts` does not cover.
+    #[test]
+    fn heavy_parts_match_demo_install() {
+        let Some(k) = demo_install() else { return };
+        let parts = k.join("GameData/Squad/Parts");
+        let pdb = cfg::parse(&std::fs::read_to_string(k.join("PartDatabase.cfg")).unwrap());
+        let cases: Vec<(&str, PartDef, &str)> = HEAVY.iter().map(|(rel, f)| (*rel, f(), "Default")).collect();
+        check_parts(&parts, &pdb, &cases);
+        for (rel, def, _) in &cases {
+            let p = part_node(&parts.join(rel));
+            assert_eq!(by_name(def.name).unwrap().name, def.name);
+            assert_eq!(p.get_f64("angularDrag"), Some(def.angular_drag), "{}", def.name);
+            assert_eq!(p.get_f64("rescaleFactor"), Some(1.0), "{}", def.name);
+            assert_eq!(p.get("node_stack_top").is_some(), def.node_top.is_some(), "{}", def.name);
+            assert_eq!(p.get("node_stack_bottom").is_some(), def.node_bottom.is_some(), "{}", def.name);
+            for k in ["CoMOffset", "CoPOffset", "CoLOffset"] {
+                assert!(p.get(k).is_none(), "{} {k}", def.name);
+            }
+            let n_res = p.nodes_named("RESOURCE").count();
+            assert_eq!(n_res, def.resources.len(), "{}", def.name);
+            // one cube for every variant
+            if let Some(m) = module(&p, "ModulePartVariants") {
+                assert_eq!(m.get("useMultipleDragCubes"), Some("false"), "{}", def.name);
+            }
+            assert!(module(&p, "ModuleLiftingSurface").is_none());
+            if let Some(w) = &def.reaction_wheel {
+                let m = module(&p, "ModuleReactionWheel").unwrap();
+                assert_eq!(m.get_f64("YawTorque"), Some(w.yaw_torque));
+                assert_eq!(m.get_f64("RollTorque"), Some(w.roll_torque));
+                assert_eq!(m.get_f64("torqueResponseSpeed").unwrap_or(30.0), w.torque_response_speed);
+            } else {
+                assert!(module(&p, "ModuleReactionWheel").is_none(), "{}", def.name);
+            }
+        }
+        // joint break forces from the cfg breakingForce (Part default 22) and the node sizes
+        let cfgp = |i: usize| part_node(&parts.join(HEAVY[i].0));
+        let bf = |i: usize| cfgp(i).get_f64("breakingForce").unwrap_or(DEFAULT_BREAKING_FORCE);
+        let size = |i: usize, key: &str| vec3(cfgp(i).get(key).unwrap()).get(6).map_or(1, |s| *s as u32);
+        let jbf = |a: usize, ka: &str, b: usize, kb: &str| joint_break_force(bf(a), bf(b), size(a, ka).min(size(b, kb)), false);
+        let (eng, large, med, adp, probe, sas, bat, nose) = (0, 1, 2, 3, 4, 5, 6, 7);
+        assert_eq!(mammoth().joint_break_force, jbf(eng, "node_stack_top", med, "node_stack_bottom"));
+        assert_eq!(s3_tank_7200().joint_break_force, jbf(med, "node_stack_top", large, "node_stack_bottom"));
+        assert_eq!(s3_tank_14400().joint_break_force, jbf(large, "node_stack_top", large, "node_stack_bottom"));
+        assert_eq!(adapter_s3_s2().joint_break_force, jbf(adp, "node_stack_bottom", large, "node_stack_top"));
+        assert_eq!(battery_bank_large().joint_break_force, jbf(bat, "node_stack_bottom", adp, "node_stack_top"));
+        assert_eq!(adv_sas_module_large().joint_break_force, jbf(sas, "node_stack_bottom", bat, "node_stack_top"));
+        assert_eq!(probe_stack_large().joint_break_force, jbf(probe, "node_stack_bottom", sas, "node_stack_top"));
+        assert_eq!(nose_cone_mk7().joint_break_force, jbf(nose, "node_stack_bottom", probe, "node_stack_top"));
+        // Mammoth modules
+        let p = cfgp(eng);
+        let e = mammoth().engine.unwrap();
+        let m = module(&p, "ModuleEnginesFX").unwrap();
+        assert_eq!(m.get_f64("minThrust"), Some(e.min_thrust));
+        assert_eq!(m.get_f64("ignitionThreshold"), Some(e.ignition_threshold));
+        assert!(m.get("useEngineResponseTime").is_none() && m.node("transformMultipliers").is_none());
+        let props: Vec<(&str, f64)> = m.nodes_named("PROPELLANT").map(|q| (q.get("name").unwrap(), q.get_f64("ratio").unwrap())).collect();
+        assert_eq!(props, vec![("LiquidFuel", 0.9), ("Oxidizer", 1.1)]);
+        let g = module(&p, "ModuleGimbal").unwrap();
+        // the gimbal transforms are the thrust transforms (no swing about a separate pivot)
+        assert_eq!(m.get("thrustVectorTransformName"), Some("obj_gimbal"));
+        assert_eq!(g.get("gimbalTransformName"), Some("obj_gimbal"));
+        for k in ["useGimbalResponseSpeed", "gimbalRangeXP", "gimbalRangeXN", "gimbalRangeYP", "gimbalRangeYN", "xMult", "yMult", "flipYZ", "enableRoll"] {
+            assert!(g.get(k).is_none(), "{k}");
+        }
+        assert!(module(&p, "ModuleAlternator").is_some());
+        assert!(module(&p, "ModuleJettison").is_none());
+        // the model holds four obj_gimbal transforms (PartReader string table: names are stored
+        // length-prefixed, so count the exact byte pattern)
+        let mu = std::fs::read(parts.join("Engine/Size3EngineCluster/Size3EngineCluster.mu")).unwrap();
+        let pat = b"\x0aobj_gimbal";
+        assert_eq!(mu.windows(pat.len()).filter(|w| w == pat).count(), thrust_transforms("Size3EngineCluster").unwrap().len());
+    }
+
+    #[test]
+    fn joint_break_force_reproduces_dumps() {
+        // dumped by SimHarness: Mk1 pod (22) / FL-T400 (50) stack joint, LT-2 (80) on FL-T400
+        assert_eq!(joint_break_force(DEFAULT_BREAKING_FORCE, 50.0, 1, false), 4400.0);
+        assert_eq!(joint_break_force(80.0, 50.0, 1, true), lt2_leg().joint_break_force);
+        assert_eq!(JBF_SIZE2, joint_break_force(DEFAULT_BREAKING_FORCE, DEFAULT_BREAKING_FORCE, 2, false));
+    }
+
+    use crate::math::Quat;
+    use crate::sim::{self, Control, EnvState, Frame, Params};
+    use crate::vessel::{Craft, Placed, VesselSpec, MAX_HULL};
+
+    fn place_above(c: &mut Craft, below: usize, def: PartDef) -> usize {
+        let p = &c.parts[below];
+        let (pt, ptd) = p.def.node_top.unwrap();
+        let (cb, cbd) = def.node_bottom.unwrap();
+        let (pos, rot, i) = (p.pos + p.rot.rotate(pt) - cb, p.rot, c.parts.len());
+        c.parts[below].stack.push((i, ptd));
+        c.parts.push(Placed { def, pos, rot, stack: vec![(below, cbd)], parent: Some(below) });
+        i
+    }
+
+    /// The heavy booster as guidance builds it (ingame::heavy_craft: root S3-14400, legs on the
+    /// S3-7200 4.3 m below its centre, airbrakes 3 m above the S3-14400 centre).
+    fn heavy_craft(legs: bool, brakes: bool) -> Craft {
+        let mut c = Craft { parts: vec![Placed { def: s3_tank_14400(), pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![], parent: None }] };
+        let med = c.stack_below(0, s3_tank_7200());
+        c.stack_below(med, mammoth());
+        let mut top = place_above(&mut c, 0, adapter_s3_s2());
+        for d in [battery_bank_large(), adv_sas_module_large(), probe_stack_large(), nose_cone_mk7()] {
+            top = place_above(&mut c, top, d);
+        }
+        let (np, nd) = (v3(0.0, 0.4271562 * 1.25, 0.0632596 * 1.25), v3(0.0, 0.5735765, 0.819152));
+        for k in 0..6 {
+            if legs {
+                c.surface_attach_editor(med, lt2_leg(), 30.0 + 60.0 * k as f64, 1.875, -4.3, np, nd);
+            }
+        }
+        for k in 0..8 {
+            if brakes {
+                c.surface_attach_editor(0, airbrake(), 45.0 * k as f64, 1.875, 3.0, AIRBRAKE_NODE.0, AIRBRAKE_NODE.1);
+            }
+        }
+        c
+    }
+
+    /// The 22-part booster fits the VesselSpec limits without dropping anything.
+    #[test]
+    fn heavy_booster_fits_limits() {
+        let c = heavy_craft(true, true);
+        assert_eq!(c.parts.len(), 22);
+        let s = VesselSpec::compile(&c);
+        assert_eq!((s.n_parts, s.n_engines, s.n_legs, s.n_aero_surf), (22, 1, 6, 8));
+        // rings + top centres: nose 4, five 2.5 m / adapter / tank parts 5 each, S3-14400 5,
+        // Mammoth 1 top + 4 body sensors + 4 nozzle capsules (passive)
+        let expect = 4 + 5 * 6 + 1 + 4 + 4;
+        assert_eq!(s.n_hull as usize, expect);
+        assert!(expect <= MAX_HULL);
+        assert_eq!((0..s.n_hull as usize).filter(|&k| !s.hull_crash[k]).count(), 4 + 4, "nose ring + nozzles never crash");
+        let e = &s.engines[0];
+        assert_eq!(e.n_nozzles, 4);
+        // mass and resources
+        let dry: f64 = c.parts.iter().map(|p| p.def.mass).sum();
+        assert!((s.dry_mass() - dry).abs() < 1e-9);
+        assert!((dry - (15.0 + 9.0 + 4.5 + 1.875 + 0.2 + 0.2 + 0.5 + 0.2 + 6.0 * 0.1 + 8.0 * 0.05)).abs() < 1e-9);
+        let lf = 6480.0 + 3240.0 + 1350.0;
+        let ox = 7920.0 + 3960.0 + 1650.0;
+        assert_eq!(s.res_cap_total[Res::LiquidFuel as usize], lf);
+        assert_eq!(s.res_cap_total[Res::Oxidizer as usize], ox);
+        assert_eq!(s.res_cap_total[Res::ElectricCharge as usize], 30.0 + 4000.0);
+        let (m, _, _) = s.mass_props(&s.full_resources());
+        assert!((m - (dry + (lf + ox) * DENSITY_LIQUID_FUEL)).abs() < 1e-9);
+        // reaction wheels sum: RC-L01 1.5 + large wheel 30
+        assert_eq!(s.rw_torque, v3(31.5, 31.5, 31.5));
+        assert!((s.rw_ec_rate - 0.75).abs() < 1e-12);
+    }
+
+    /// Mammoth thrust at sea level and in vacuum (Isp 295 / 315 s, maxThrust 4000 at Isp(0)).
+    #[test]
+    fn mammoth_thrust_asl_vacuum() {
+        let s = VesselSpec::compile(&heavy_craft(false, false));
+        let e = &s.engines[0];
+        let mut res = s.full_resources();
+        let (t_vac, out, _) = crate::engine::burn(e, 1.0, 0.0, &mut res, 0.02);
+        let (t_asl, _, _) = crate::engine::burn(e, 1.0, 1.0, &mut res, 0.02);
+        assert!(!out);
+        assert!((t_vac - 4000.0).abs() < 1e-3, "{t_vac}");
+        assert!((t_asl - 4000.0 * 295.0 / 315.0).abs() < 1e-3, "{t_asl}");
+        // propellant draw: maxFuelFlow = 4000 / (315 g0) t/s split LF:Ox 0.9:1.1 by volume
+        let flow = 4000.0 / (315.0 * crate::engine::ENGINE_G0);
+        assert!((e.max_fuel_flow - flow).abs() < 1e-12);
+    }
+
+    /// One tick in vacuum from rest (q = identity, w = 0): the angular velocity change is
+    /// I^-1 * torque * dt, so torques compare through it.
+    fn spin_up(s: &VesselSpec, ctl: &Control) -> V3 {
+        let r0 = crate::body::KERBIN.radius + 400_000.0;
+        let mut st = EnvState { frame: Frame::Inertial, x: v3(r0, 0.0, 0.0), v: v3(0.0, (crate::body::KERBIN.gm() / r0).sqrt(), 0.0), q: Quat::IDENTITY, res: s.full_resources(), ..Default::default() };
+        sim::tick(s, &Params::default(), &mut st, ctl);
+        st.w
+    }
+
+    fn torque_of(s: &VesselSpec, dw: V3) -> V3 {
+        let (_, _, i) = s.mass_props(&s.full_resources());
+        let r = [i[0][0] * dw.x + i[0][1] * dw.y + i[0][2] * dw.z, i[1][0] * dw.x + i[1][1] * dw.y + i[1][2] * dw.z, i[2][0] * dw.x + i[2][1] * dw.y + i[2][2] * dw.z];
+        v3(r[0], r[1], r[2]) / sim::FIXED_DT
+    }
+
+    /// Four nozzles vs the single-nozzle equivalent at their centroid: identical pitch / yaw
+    /// response (exact for equal deflections), the same signs as the reaction wheels, and the roll
+    /// torque ModuleGimbal's per-nozzle roll mix makes (none for the single nozzle).
+    #[test]
+    fn mammoth_gimbal_four_nozzles() {
+        let mut s4 = VesselSpec::compile(&heavy_craft(false, false));
+        // gimbal only: no reaction wheels
+        let rw = (s4.rw_torque, s4.rw_ec_rate);
+        s4.rw_torque = V3::ZERO;
+        s4.rw_ec_rate = 0.0;
+        let mut s1 = s4;
+        s1.engines[0].n_nozzles = 0;
+        let mut s_rw = s4;
+        (s_rw.rw_torque, s_rw.rw_ec_rate) = rw;
+        let ctl = |throttle: f64, pitch: f64, yaw: f64, roll: f64| Control { throttle, pitch, yaw, roll };
+        let base = spin_up(&s4, &ctl(1.0, 0.0, 0.0, 0.0));
+        assert!(base.norm() < 1e-9, "straight thrust through the axis: {base:?}");
+        for (p, y) in [(1.0, 0.0), (0.0, 1.0), (-0.6, 0.35), (0.3, -1.0)] {
+            let w4 = spin_up(&s4, &ctl(1.0, p, y, 0.0));
+            let w1 = spin_up(&s1, &ctl(1.0, p, y, 0.0));
+            assert!((w4 - w1).norm() < 1e-9 * w1.norm().max(1e-12) + 1e-15, "{p} {y}: {w4:?} vs {w1:?}");
+        }
+        let (_, com, _) = s4.mass_props(&s4.full_resources());
+        let h = s4.engines[0].pos.y - com.y;
+        let t = 4000.0 * crate::engine::isp(&s4.engines[0], 0.0) / 315.0;
+        let sin2 = 2f64.to_radians().sin();
+        // pitch / yaw / roll: torque about root X / Z / Y, sign as the wheels' for the same input
+        for (axis, c, expect) in [(0, ctl(1.0, 1.0, 0.0, 0.0), -h * t * sin2), (2, ctl(1.0, 0.0, 1.0, 0.0), -h * t * sin2), (1, ctl(1.0, 0.0, 0.0, 1.0), t * (0.76 + 1.38) * sin2)] {
+            let tq = torque_of(&s4, spin_up(&s4, &c));
+            let tq = [tq.x, tq.y, tq.z][axis];
+            let wheel = spin_up(&s_rw, &Control { throttle: 0.0, ..c });
+            let wheel = [wheel.x, wheel.y, wheel.z][axis];
+            assert!(tq.signum() == wheel.signum() && wheel != 0.0, "axis {axis}: gimbal {tq} vs wheel {wheel}");
+            assert!((tq.abs() - expect.abs()).abs() < 0.01 * expect.abs(), "axis {axis}: {tq} vs {expect}");
+        }
+        let w1 = spin_up(&s1, &ctl(1.0, 0.0, 0.0, 1.0));
+        assert!(w1.norm() < 1e-9, "single nozzle has no roll authority: {w1:?}");
+        // roll saturates the per-nozzle channel: with full pitch the nozzles on one side clamp
+        let both = torque_of(&s4, spin_up(&s4, &ctl(1.0, 1.0, 0.0, 1.0)));
+        let roll_only = torque_of(&s4, spin_up(&s4, &ctl(1.0, 0.0, 0.0, 1.0)));
+        assert!(both.y.abs() < roll_only.y.abs());
+    }
+
+    /// Mammoth + S3 tanks + six LT-2 legs (the heavy booster): settles on the pad without a
+    /// crash, then a 3 s full-throttle hop accelerates at thrust / mass - g.
+    #[test]
+    fn heavy_booster_pad_and_hop() {
+        let s = VesselSpec::compile(&heavy_craft(true, true));
+        let prm = Params::default();
+        let mut st = sim::state_landed(&s, 0.0);
+        let idle = Control::default();
+        for _ in 0..250 {
+            sim::tick(&s, &prm, &mut st, &idle);
+        }
+        assert_ne!(st.status, sim::STATUS_CRASHED);
+        assert!(st.v.norm() < 0.05 && st.w.norm() < 0.01, "{:?} {:?}", st.v, st.w);
+        let (_, _, up) = sim::pad_enu();
+        let full = Control { throttle: 1.0, ..Default::default() };
+        let mut v_prev = st.v.dot(up);
+        let mut worst: f64 = 0.0;
+        for i in 0..150 {
+            let info = sim::tick(&s, &prm, &mut st, &full);
+            assert_ne!(st.status, sim::STATUS_CRASHED);
+            let v = st.v.dot(up);
+            if i > 25 {
+                // vertical: thrust / m - g (rotating frame: centrifugal ~0.03 m/s^2 at the pad)
+                let r = st.x.norm();
+                let g = crate::body::KERBIN.gm() / (r * r);
+                let a_exp = info.thrust / info.mass - g;
+                worst = worst.max(((v - v_prev) / sim::FIXED_DT - a_exp).abs() / a_exp);
+            }
+            v_prev = v;
+        }
+        // 155.475 t wet (32.475 dry + 123 propellant): sea-level TWR 3746 kN / 1525 kN = 2.456
+        let m0 = s.mass_props(&s.full_resources()).0;
+        assert!((m0 - 155.475).abs() < 1e-9, "{m0}");
+        let twr = 4000.0 * 295.0 / 315.0 / (m0 * 9.81);
+        assert!((twr - 2.456).abs() < 1e-3, "{twr}");
+        assert!(worst < 0.02, "acceleration error {worst}");
+        assert!(st.v.dot(up) > 30.0 && st.w.norm() < 0.01, "{:?} {:?}", st.v, st.w);
+    }
+
+    /// trace::spec_from_geometry with a dumped Mammoth: its four thrustTransform lines make one
+    /// engine with four nozzles (Unity -> sim x mirror), and a `joints=3` count scales the dumped
+    /// per-joint breakForce to the sum the catalog carries.
+    #[test]
+    fn geometry_dump_multi_nozzle_engine() {
+        let mut g = String::from("test = synthetic\nPART {\n idx = 0\n name = Size3MediumTank\n parent = -1\n localPos = 0,0,0\n localRot = 0,0,0,1\n}\n");
+        g += "PART {\n idx = 1\n name = Size3EngineCluster\n parent = 0\n localPos = 0,-3.464248,0\n localRot = 0,0,0,1\n";
+        g += " joint = ConfigurableJoint breakForce=40000 joints=3 rigid=False\n";
+        for (x, z) in [(-0.76, 1.38), (0.76, 1.38), (0.76, -1.38), (-0.76, -1.38)] {
+            g += &format!(" thrustTransform = pos={x},-4.604248,{z} fwd=0,-1,0 maxThrust=4000 maxFuelFlow=1.2948 g=9.80665 useResponse=False\n");
+            g += &format!(" gimbalTransform = pos={x},-4.604248,{z} rot=0,0.7071068,-0.7071068,0 initRot=0,0,-0.7071068,0.7071068 range=2 XP=2 XN=2 YP=2 YN=2 useSpeed=False speed=10\n");
+        }
+        g += "}\n";
+        let (_, geom) = crate::trace::parse_geometry(&g);
+        let s = crate::trace::spec_from_geometry(&geom);
+        assert_eq!(s.n_engines, 1);
+        let e = &s.engines[0];
+        assert_eq!(e.n_nozzles, 4);
+        assert!((e.pos - v3(0.0, -4.604248, 0.0)).norm() < 1e-12 && e.pivot == e.pos);
+        assert!((e.dir - v3(0.0, 1.0, 0.0)).norm() < 1e-12);
+        assert_eq!(e.max_fuel_flow, 1.2948);
+        // Unity (-0.76, z 1.38) is sim (+0.76, 1.38): roll adds to pitch with -1 (Unity x < 0), to yaw with +1
+        assert_eq!(e.nozzles[0], v3(0.76, -4.604248, 1.38));
+        assert_eq!(e.nozzle_roll[0], [-1.0, 1.0]);
+        // same nozzles as the catalog's, placed below the S3-7200
+        let c = VesselSpec::compile(&{
+            let mut c = Craft { parts: vec![Placed { def: s3_tank_7200(), pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![], parent: None }] };
+            c.stack_below(0, mammoth());
+            c
+        });
+        for j in 0..4 {
+            assert!((c.engines[0].nozzles[j] - e.nozzles[j]).norm() < 1e-9, "{j}");
+            assert_eq!(c.engines[0].nozzle_roll[j], e.nozzle_roll[j]);
+        }
+        assert_eq!(s.part_break_force[1], 120000.0);
+        assert_eq!(s.part_break_force[1], mammoth().joint_break_force);
     }
 }

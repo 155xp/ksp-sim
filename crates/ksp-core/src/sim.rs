@@ -99,7 +99,7 @@ pub struct EnvState {
     pub ksc_dz: f64,
     /// hull points in ground contact after the last tick (bit k = hull point k): a contact that
     /// was not there before is a PhysX OnCollisionEnter (Part.HandleCollision crash check)
-    pub hull_touch: u32,
+    pub hull_touch: u64,
     /// Brakes action group (`vessel.ActionGroups[Brakes]` -> `ModuleAeroSurface.deploy`, set by
     /// `ActionToggleBrakes`). Vessel state, not a FlightCtrlState axis: set it and it stays.
     pub brakes: bool,
@@ -651,14 +651,34 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         // measured in game (trace Ascent80): ModuleGimbal.actuation = (pitch, roll, yaw); pitch
         // tilts the thrust toward root +Z by actuation.x * range, yaw toward the sim's root +X
         // (Unity -X) by actuation.z * range.
-        let gq = Quat::angle_axis(st.gimbal[k][0], v3(1.0, 0.0, 0.0)) * Quat::angle_axis(-st.gimbal[k][1], v3(0.0, 0.0, 1.0));
-        let dir_w = st.q.rotate(gq.rotate(e.dir));
-        // the thrust transform is a child of the gimbal transform: it swings about the pivot
-        // (measured: torque ratio 0.867 vs a fixed application point, trace HopperPadLand v6)
-        let tp_w = st.q.rotate(e.pivot + gq.rotate(e.pos - e.pivot));
-        let f = dir_w * thrust;
-        force += f;
-        torque += (tp_w - r_com).cross(f);
+        if e.n_nozzles == 0 {
+            let gq = Quat::angle_axis(st.gimbal[k][0], v3(1.0, 0.0, 0.0)) * Quat::angle_axis(-st.gimbal[k][1], v3(0.0, 0.0, 1.0));
+            let dir_w = st.q.rotate(gq.rotate(e.dir));
+            // the thrust transform is a child of the gimbal transform: it swings about the pivot
+            // (measured: torque ratio 0.867 vs a fixed application point, trace HopperPadLand v6)
+            let tp_w = st.q.rotate(e.pivot + gq.rotate(e.pos - e.pivot));
+            let f = dir_w * thrust;
+            force += f;
+            torque += (tp_w - r_com).cross(f);
+        } else {
+            // several thrust transforms, each its own gimbal transform (ModuleGimbal.FixedUpdate
+            // loops over gimbalTransforms): GimbalRotation per nozzle = (s * pitch + roll mix,
+            // s * yaw + roll mix), each clamped to +-1, times the range; force thrust *
+            // thrustTransformMultipliers (1/n) at the nozzle (ModuleEngines.ThrustUpdate)
+            let roll = ctl.roll.clamp(-1.0, 1.0);
+            let share = thrust / e.n_nozzles as f64;
+            for j in 0..e.n_nozzles as usize {
+                let q = e.nozzles[j];
+                let s = if com_l.y > q.y { 1.0 } else { -1.0 };
+                let [rx, rz] = e.nozzle_roll[j];
+                let ax = (s * ctl.pitch.clamp(-1.0, 1.0) + rx * roll).clamp(-1.0, 1.0) * e.gimbal_range_deg;
+                let az = (s * ctl.yaw.clamp(-1.0, 1.0) + rz * roll).clamp(-1.0, 1.0) * e.gimbal_range_deg;
+                let gq = Quat::angle_axis(ax, v3(1.0, 0.0, 0.0)) * Quat::angle_axis(-az, v3(0.0, 0.0, 1.0));
+                let f = st.q.rotate(gq.rotate(e.dir)) * share;
+                force += f;
+                torque += (st.q.rotate(q) - r_com).cross(f);
+            }
+        }
         info.thrust += thrust;
     }
 
@@ -906,7 +926,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         // Part.OnCollisionEnter -> CheckCollision -> HandleCollision: a new contact on a part's
         // primary collider destroys the part if |relativeVelocity| (the part rigidbody's
         // velocity against the static ground, before the solve) exceeds its crashTolerance
-        let mut touch = 0u32;
+        let mut touch = 0u64;
         for c in &contacts[..nc] {
             if c.gap <= 0.01 {
                 contact_any = true;

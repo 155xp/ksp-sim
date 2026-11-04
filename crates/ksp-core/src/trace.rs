@@ -198,7 +198,14 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
     let mut e_idx = 0;
     // joint breakForce per part from the dump (INF for the root); hull points take their part's
     for (i, g) in geom.iter().enumerate() {
-        let bf = g.get("joint").and_then(|j| fields(j).get("breakForce").map(|b| nums(b)[0])).unwrap_or(f64::INFINITY);
+        // the dump logs PartJoint.Joint = joints[0]; nodes of size >= 2 have 3 internal joints
+        // sharing the load, and the sim's single joint carries their sum (`parts::joint_break_force`).
+        // An optional `joints=` count (PartJoint.joints.Count) scales it; older dumps have none.
+        let bf = g.get("joint").and_then(|j| {
+            let f = fields(j);
+            let n = f.get("joints").map_or(1.0, |n| nums(n)[0]);
+            f.get("breakForce").map(|b| nums(b)[0] * n)
+        }).unwrap_or(f64::INFINITY);
         s.part_break_force[i] = if g.parent >= 0 { bf } else { f64::INFINITY };
     }
     for k in 0..s.n_hull as usize {
@@ -277,21 +284,27 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
             }
             _ => start,
         };
-        for tt in tsrc {
-            let f = fields(tt);
-            let p = mpos(&nums(&f["pos"]));
-            let fw = mpos(&nums(&f["fwd"]));
-            if e_idx < s.n_engines as usize {
+        // one ModuleEngines per part: every thrustTransform line of the part belongs to the same
+        // engine (the Mammoth dumps four, one per nozzle)
+        if !tsrc.is_empty() && e_idx < s.n_engines as usize {
+            let tts: Vec<_> = tsrc.iter().map(|tt| fields(tt)).collect();
+            let ps: Vec<V3> = tts.iter().map(|f| mpos(&nums(&f["pos"]))).collect();
+            let dir = tts.iter().fold(V3::ZERO, |a, f| a - mpos(&nums(&f["fwd"])).normalized());
+            let e = &mut s.engines[e_idx];
+            if ps.len() == 1 {
                 if let Some(gt) = g.get("gimbalTransform") {
-                    s.engines[e_idx].pivot = mpos(&nums(&fields(gt)["pos"]));
+                    e.pivot = mpos(&nums(&fields(gt)["pos"]));
                 }
-                s.engines[e_idx].pos = p;
-                s.engines[e_idx].dir = -fw.normalized();
-                if let Some(mf) = f.get("maxFuelFlow") {
-                    s.engines[e_idx].max_fuel_flow = nums(mf)[0];
-                }
-                e_idx += 1;
+                e.pos = ps[0];
+            } else {
+                // each nozzle is its own gimbal transform (no swing); pos / pivot = centroid
+                e.set_nozzles(&ps);
             }
+            e.dir = if ps.len() == 1 { dir } else { dir.normalized() };
+            if let Some(mf) = tts[0].get("maxFuelFlow") {
+                e.max_fuel_flow = nums(mf)[0];
+            }
+            e_idx += 1;
         }
     }
     s.update_bounds();

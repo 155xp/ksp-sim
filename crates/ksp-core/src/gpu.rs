@@ -140,7 +140,7 @@ pub fn unpack_state(a: &[f64]) -> EnvState {
     }
     s.ground_shift = v3(a[st::GSHIFT], a[st::GSHIFT + 1], a[st::GSHIFT + 2]);
     s.ksc_dz = a[st::KSCDZ];
-    s.hull_touch = a[st::HTOUCH] as u32;
+    s.hull_touch = a[st::HTOUCH] as u64;
     s
 }
 
@@ -176,6 +176,9 @@ const MB_STRIDE: usize = 22;
 
 pub fn pack(spec: &VesselSpec, prm: &Params) -> Pack {
     let b: &RawBody = prm.body;
+    // cuda_tick.cu keeps the hull contact mask in an unsigned int and has no per-nozzle gimbal
+    assert!(spec.n_hull <= 32, "CUDA kernel: at most 32 hull points (n_hull {})", spec.n_hull);
+    assert!(spec.engines[..spec.n_engines as usize].iter().all(|e| e.n_nozzles == 0), "CUDA kernel: multi-nozzle engines not supported");
     let mut p = Packer { data: vec![], header: String::new() };
     writeln!(p.header, "#define MAX_PARTS {MAX_PARTS}\n#define MAX_ENGINES {MAX_ENGINES}\n#define MAX_LEGS {MAX_LEGS}\n#define MAX_HULL {MAX_HULL}\n#define MAX_ISP_KEYS {MAX_ISP_KEYS}\n#define LEG_FIELDS {LEG_FIELDS}\n#define STATE_FIELDS {STATE_FIELDS}").unwrap();
     for (n, v) in [("UT", st::UT), ("X", st::X), ("V", st::V), ("Q", st::Q), ("W", st::W), ("RES", st::RES), ("THR", st::THR), ("GIMBAL", st::GIMBAL),
