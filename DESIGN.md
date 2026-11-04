@@ -34,8 +34,29 @@ wiki numbers (constants, engine stats).
   vectors map to it as `.xzy`. Rotation angle at UT: `(initialRotation + 360·UT/P_sid) mod 360`
   (`CelestialBody.CBUpdate`), with the sidereal period derived from the serialized 21600 s solar
   day as `CelestialBody.Start` does.
-* Krakensbane and FloatingOrigin are pure Galilean shifts for float precision; the sim uses f64 and
-  ignores them.
+* Krakensbane and FloatingOrigin are Galilean shifts for float precision. The sim uses f64 and
+  doesn't need them for the vessel; they matter only in two places. The logger sees positions one
+  tick ahead while Krakensbane is engaged (corrected in `trace.rs`). And the scenery is re-rounded
+  at each origin shift (next section).
+
+## Scenery placement
+
+`FloatingOrigin.setOffset` subtracts the offset from every `CelestialBody.position` (double). The
+PQS and KSC Unity transforms are float and are rebuilt from those positions, at ~600 km coordinate
+magnitude where the float ulp is 1.5–6 cm. So the colliders of the pad, the KSC and the terrain
+sit a few cm from where the double-precision body says they are. Measured in game (harness ground
+probe, VALIDATION_INGAME.md):
+
+* the whole scenery is translated by the PQS transform's rounding vector. It is re-rounded at
+  every origin shift, which happens every tick while radar altitude is above ~150 m and not below
+  it. Radial part: σ 9 mm, within ±2.2 cm;
+* the KSC colliders carry an extra radial offset fixed per game session: 0 in 7 of 9 sessions,
+  +3.7 cm and −1.3 cm in the other two. PQS terrain doesn't.
+
+The sim models both as `EnvState.ground_shift` (translation of all scenery) and `EnvState.ksc_dz`
+(KSC colliders, i.e. grid cells whose surveyed collider is not PQS terrain); `sim::Scenery`.
+Traces seed them from the logged values. Training resets can randomize them (`ground_shift_max`,
+`ksc_dz_max`; default 0 = the surveyed placement).
 
 ## One physics tick (dt = 0.02 s), in KSP's order
 
@@ -55,35 +76,68 @@ wiki numbers (constants, engine stats).
    propellant draw with `ignitionThreshold` deprivation / flameout (`RequestPropellant`,
    `CheckDeprived`). Two-value cfg keys get Unity `AddKey` smooth tangents (only the inserted key's
    slope is set, so Isp between keys is *not* linear: Swivel at 0.5 atm = 293.75 s, not 285 s).
-5. **Gimbal / reaction wheel**: wheel torque = rotation·−(pitch·Pt, roll·Rt, yaw·Yt) lerped at
-   30·dt, gated by ElectricCharge (`ModuleReactionWheel`); gimbal deflection = input × range.
+5. **Gimbal / reaction wheel.**
+   - **Wheel torque** = rotation·−inputVector, with inputVector = (pitch·Pt, roll·Rt, yaw·Yt)
+     lerped at 30·dt and gated by ElectricCharge (`ModuleReactionWheel`). Torque is a
+     pseudovector, so in the sim's x-mirrored frame it is (−x, +y, +z).
+   - **Gimbal:** actuation (pitch, roll, yaw) at 3° per unit. Pitch tilts toward root +Z, yaw
+     toward sim +X. The thrust transform rotates about the measured gimbal pivot, so the thrust
+     point swings with the deflection. Thrust transform and pivot positions come from the game's
+     geometry dump.
 6. **Aero per part** (`FlightIntegrator.UpdateAerodynamics`, cube model): per face i
    `S = DragCurveValue((d·n_i+1)/2, M)` (lerp TAIL→SURFACE→TIP × MULTIPLIER), area += A_i·S,
    areaDrag += A_i·S·Cd′ with Cd′ = DRAG_CD(Cd)^DRAG_CD_POWER(M) for Cd < 1; drag =
    q_part · areaDrag · 0.1 · DRAG_PSEUDOREYNOLDS(ρ·v) · 8 along −v, applied at the part's CoP.
    Faces covered by stack neighbours are occluded at build time exactly like
    `DragCubeList.SetPartOcclusion`. Body lift from windward faces through the BodyLift curve × 18,
-   projected perpendicular to v. Angular drag: `rb.angularDrag = angularDrag·q_atm·2`.
-7. **Ground contact**: legs as wheel-collider-like springs, `spring = springRatio × sprung weight`,
-   `damper = sqrt(spring·damperRatio)` (`ModuleWheelSuspension.SuspensionSpringUpdate`), Coulomb
-   friction; hull points (tank rims, nozzle, pod top) as stiff contacts that destroy the vessel above
-   the part's `crashTolerance`.
-8. **Integrate** like PhysX: v += a·dt, x += v·dt; ω += I⁻¹τ·dt, angular damping, |ω| ≤ 50 rad/s.
+   projected perpendicular to v and applied at the part's CoL. Angular drag:
+   `rb.angularDrag = angularDrag·q_atm·2`, applied per part as c_i·I_own,i. Drag cubes are
+   mirrored into the sim frame (XP ↔ XN).
+7. **Ground contact.**
+   - **Ground:** the in-game raycast survey of layer 15 (PQS terrain + KSC colliders) on a 0.2 m
+     grid within ±40 m of the pad and a 4 m grid within ±1.5 km (`terrain.rs`), placed per
+     `Scenery`. Friction: Unity default 0.6 / Average on KSC colliders, "Ground" 0.9 / Maximum on
+     PQS terrain.
+   - **Legs:** the whole chain, each step in float as in the game.
+     1. `SuspensionLoadBalancer` gives the sprung mass share.
+     2. `ModuleWheelSuspension` computes spring/damper: BoostCurve, autoBoost,
+        springTweakable/damperTweakable, rounding, and the 3 / 1.05 hysteresis.
+     3. The VPP wheel collider applies them one tick late, with target clamp 0.1 and slew 0.02.
+     4. PhysX applies F = k(x − target·d) + c·dx/dt, projected on the ground normal.
+
+     The ray runs along the leg's suspension axis. The tire is the locked-wheel friction model
+     (Smooth curve (0.01, 0.1), (2, 1), (7, 1), with Fext = −0.5·(F/g)·V/dt lerped at 10·dt).
+   - **Hull points:** the collider extremes from the geometry dump. They feed a sequential-impulse
+     solve (8 iterations, inelastic, speculative within contactOffset 0.01 m, depenetration at
+     0.55 of the gap per tick). The vessel crashes when a contact impulse exceeds the part joint's
+     breakForce, or the post-solve normal speed exceeds `crashTolerance`.
+   - **Early-out:** above the highest ground point (plus the scenery offset) none of this runs.
+8. **Integrate** like PhysX: v += a·dt, x += v·dt. For rotation, the composite inertia about
+   the CoM integrates ω += I⁻¹(τ − ω×(I_orb·ω))·dt, where I_orb is the parallel-axis part only:
+   each PhysX body integrates its own spin, so only the orbital part shows up as a vessel-level
+   gyroscopic term. Then per-part angular damping, |ω| ≤ 50 rad/s. Ground contacts are resolved
+   after the velocity update.
    In vacuum (P = 0, above the atmosphere, not landed) KSP's **orbit drift compensation**
    (`VesselPrecalculate`, ORBIT_DRIFT_COMPENSATION) pins the CoM to the Kepler conic and adds only
    non-gravitational dv; the sim does the same after 5 vacuum frames.
 
-## Deliberate approximations (and why)
+## What is not 1:1
 
-| approximation | KSP | impact for the pad lander |
-|---|---|---|
-| vessel = one rigid body | every part is a PhysX rigidbody with joints | negligible for a short, stiff lander; no joint flex/wobble |
-| part inertia = box of drag-cube size | inertia from colliders (model files) | rotational response within tens of percent |
-| thrust transform at the engine bottom node, along part +Y | `thrustTransform` in the .mu model | correct line of action for on-axis engines |
-| gimbal = rotation about root X/Z by input × range | `ModuleGimbal.GimbalRotation` per transform | same authority and sign as the wheel; transform hierarchy not modelled |
-| leg spring/damper without boost / auto-spring terms; foot point from cube extents | `ModuleWheelSuspension` + VehiclePhysics wheel collider | touchdown dynamics are plausible but not 1:1 |
-| terrain = sphere at pad-deck altitude | PQS terrain + KSC colliders | exact at the pad; wrong away from it |
-| temperature offset refreshed every 25 ticks | per rendered frame | < 1e-4 K |
-| thermal model, buoyancy, parachutes, lifting surfaces, RCS: not implemented | | not needed for powered landing on the pad |
-| only the main body's gravity; SOI changes not handled in the physics tick | same (no n-body) | none near Kerbin |
-| FloatCurve evaluated in f64 with f32 inputs/outputs | Unity float math | ~1e-7 relative |
+The current list, each item with its measured bound against the running game, is in
+VALIDATION_INGAME.md ("What is still not 1:1"). In short:
+- the vessel is one rigid body (joint flex, i.e. thrust-axis sag ≤ 2e-4 rad, is noise);
+- the contact solver is sequential impulses on the composite (post-impact sliding 0.2–0.45 m
+  over 5 s on hard impacts, ≤ 5 cm on soft pad landings);
+- the crash rule is not yet validated by a crash series;
+- yaw response during fast gimbal ramps is off by ~7%;
+- terrain off the pad is good to ~1 cm;
+- the GPU kernels have no vacuum orbit-drift compensation.
+
+## Precision
+
+The CPU tick is f64 except where the game uses float: drag-cube faces, the wheel/suspension
+chain, curve arguments and results. The GPU `mixed` kernel goes further. It keeps double only
+where KSP keeps double (CoM position and velocity, gravity, altitude, resource amounts, attitude
+accumulation) and computes everything Unity/PhysX computes in float in float, including the
+terrain queries, which run in a local frame at the pad. Its error against the game equals the
+CPU's to 3 significant figures on every trace. The GPU `f64` kernel matches the CPU to 1e-9 m.
