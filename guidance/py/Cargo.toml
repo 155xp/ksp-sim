@@ -1,0 +1,15 @@
+[package]
+name = "ksp-guidance-py"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+ksp-guidance = { path = "../core" }
+ksp-core = { path = "../../crates/ksp-core" }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+numpy = "0.23"
+rayon = "1.10"

@@ -1,0 +1,9 @@
+[package]
+name = "ksp-guidance"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ksp-core = { path = "../../crates/ksp-core" }
+rayon = "1.10"
+clarabel = "0.11"

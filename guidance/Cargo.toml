@@ -1,0 +1,19 @@
+# Separate workspace: the guidance crates consume ksp-core read-only (path dependency) and are
+# not members of the sim workspace, so nothing in the sim's manifests changes.
+[workspace]
+resolver = "2"
+members = ["core", "py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Private"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 2
