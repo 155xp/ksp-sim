@@ -58,12 +58,17 @@ def draw(data: str, out: str, width_px: int = 3000):
     outcome, fe, fn = z["outcome"], z["final_e"], z["final_n"]
     sizes = z["size"]
     miss = np.hypot(fe, fn)
-    landed = outcome == 1
+    declared = np.zeros(len(outcome), bool)
+    for k in ("abort", "divert"):
+        if k in z.files:
+            declared |= z[k] > 0
+    intact = outcome == 1
+    landed = intact & ~declared
     n = len(lens)
 
     dpi = 200
     fig = plt.figure(figsize=(width_px / dpi, width_px / dpi * 0.56), dpi=dpi, facecolor=SURFACE)
-    ax = fig.add_axes([0.0, 0.0, 0.70, 0.93], projection="3d", facecolor=SURFACE)
+    ax = fig.add_axes([0.02, 0.07, 0.64, 0.80], projection="3d", facecolor=SURFACE)
     ax.set_proj_type("persp", focal_length=0.35)
 
     # extent from the data
@@ -106,13 +111,14 @@ def draw(data: str, out: str, width_px: int = 3000):
             s = t[sep[0]]
             ax.scatter([s[1] / 1e3], [s[2] / 1e3], [s[3] / 1e3], s=6, color=INK, edgecolors="none", depthshade=False, zorder=8)
     ax.scatter([0], [0], [0], s=40, marker="o", facecolors="none", edgecolors=INK, linewidths=1.0, depthshade=False, zorder=9)
-    ax.text(0, -ymax * 0.12, 0.6, "KSC pad", color=INK, fontsize=9, zorder=10)
+    ax.text(-2.0, -ymax * 0.35, 0.3, "KSC pad", color=INK, fontsize=9, zorder=10)
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(-ymax, ymax)
     ax.set_zlim(-1.0, ztop)
-    ax.set_box_aspect((xmax - xmin, 2 * ymax, ztop + 1.0))
-    ax.view_init(elev=16, azim=-118)
+    # altitude compressed 2.2x so the arcs fill the frame (stated on the axis label)
+    ax.set_box_aspect((xmax - xmin, 2 * ymax, (ztop + 1.0) / 2.2), zoom=1.1)
+    ax.view_init(elev=18, azim=-62)
     for a in (ax.xaxis, ax.yaxis, ax.zaxis):
         a.set_pane_color((0, 0, 0, 0))
         a.line.set_color(MUTED)
@@ -121,7 +127,7 @@ def draw(data: str, out: str, width_px: int = 3000):
     ax.tick_params(colors=INK2, labelsize=7, pad=1)
     ax.set_xlabel("east of pad (km)", color=INK2, fontsize=8, labelpad=6)
     ax.set_ylabel("north (km)", color=INK2, fontsize=8, labelpad=4)
-    ax.set_zlabel("altitude above pad (km)", color=INK2, fontsize=8, labelpad=4)
+    ax.set_zlabel("altitude (km, axis compressed 2.2x)", color=INK2, fontsize=8, labelpad=4)
 
     # title + stats
     ok = landed & (miss <= 10)
@@ -144,10 +150,10 @@ def draw(data: str, out: str, width_px: int = 3000):
         th = np.linspace(0, 2 * np.pi, 200)
         ia.plot(r * np.cos(th), r * np.sin(th), color=MUTED, lw=0.7, ls=ls)
     size_c = {1: COLORS[0], 2: COLORS[1], 3: COLORS[2]}
-    for s in (1, 2, 3):
+    for s in (3, 2, 1):
         m = landed & (sizes == s)
         ia.scatter(fe[m], fn[m], s=10, color=size_c[s], edgecolors=SURFACE, linewidths=0.4, zorder=3)
-    bad = ~landed
+    bad = ~intact
     if bad.any():
         inside = bad & (np.abs(fe) < lim) & (np.abs(fn) < lim)
         ia.scatter(fe[inside], fn[inside], s=14, marker="x", color=INK, linewidths=0.8, zorder=4)
@@ -168,14 +174,16 @@ def draw(data: str, out: str, width_px: int = 3000):
     sl = [mpl_label for mpl_label in ("1.25 m", "2.5 m", "3.75 m")]
     ih = [Line2D([0], [0], marker="o", color="#202020", markerfacecolor=size_c[s], markersize=5, lw=0) for s in (1, 2, 3)]
     ia.legend(ih, sl, loc="lower right", frameon=False, fontsize=7.5, labelcolor=INK2, handletextpad=0.3)
-    txt = (f"landed on pad (<= 10 m): {ok.sum()} / {n}\n"
-           f"miss p50 {np.percentile(lm, 50):.2f} m, p90 {np.percentile(lm, 90):.2f} m, max {lm.max():.2f} m" if landed.any() else "")
+    nd = int((declared & intact).sum())
+    txt = (f"landed on the pad: {ok.sum()} / {n}"
+           + (f"\n{nd} declared divert{'s' if nd != 1 else ''} (pad out of reach) landed intact elsewhere" if nd else "") + "\n"
+           + (f"pad miss p50 {np.percentile(lm, 50):.2f} m, p90 {np.percentile(lm, 90):.2f} m, max {lm.max():.2f} m" if landed.any() else ""))
     fig.text(0.71, 0.13, txt, color=INK2, fontsize=8.5, va="top")
-    fig.text(0.71, 0.075, "Kerbin surface drawn as the sim's sphere at pad-deck altitude;\nterrain and buildings are not modelled.", color=MUTED, fontsize=7, va="top")
+    fig.text(0.71, 0.045, "Kerbin surface drawn as the sim's sphere at pad-deck altitude;\nterrain and buildings are not modelled.", color=MUTED, fontsize=7, va="top")
 
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=dpi, facecolor=SURFACE)
-    stats = dict(n=int(n), on_pad=int(ok.sum()), landed=int(landed.sum()),
+    stats = dict(n=int(n), on_pad=int(ok.sum()), pad_aimed_landed=int(landed.sum()), declared=int(declared.sum()),
                  miss_p50=float(np.percentile(lm, 50)), miss_p90=float(np.percentile(lm, 90)), miss_max=float(lm.max()))
     print(json.dumps(stats))
     return stats

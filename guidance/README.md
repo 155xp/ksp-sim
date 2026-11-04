@@ -101,4 +101,8 @@ boosters. The classic guidance remains the default and the fallback.
 
 ## Results
 
-See the report in the branch PR / commit message and `docs/ksp-landings.png`.
+`docs/RESULTS.md`: version-by-version Monte Carlo tables per booster class (3,200 flights per
+run), the verdict against the 3 m / 5 m bar, failure analysis; `docs/ksp-landings.png`: 100
+real trajectories. Final (v6, baseline law): 99.0 % pad landings within 10 m, 99.9 % intact,
+pad miss p50 0.09 m / p99 2.64 m; 1.25 m and 3.75 m classes p99 <= 0.54 m with and without model
+errors; the 2.5 m class tail (Vector clusters, 3-3.7 m) and one 19 m outlier remain.
