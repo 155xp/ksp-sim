@@ -793,6 +793,48 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         st.hull_touch = touch;
         let mut lam_n = [0.0f64; MAX_CONTACTS];
         let mut lam_t = [V3::ZERO; MAX_CONTACTS];
+        // patch warm start: contacts of one part with (nearly) the same normal form a patch
+        // (PhysX groups them per shape pair); solve one constraint at the patch centroid and
+        // share its impulse equally, so a flat, evenly loaded patch takes an even impulse instead
+        // of the order-dependent split Gauss-Seidel finds for redundant coplanar contacts
+        let mut done = [false; MAX_CONTACTS];
+        for a in 0..nc {
+            if done[a] {
+                continue;
+            }
+            let mut idx = [0usize; MAX_CONTACTS];
+            let mut cnt = 0;
+            for b in a..nc {
+                if !done[b] && contacts[b].part == contacts[a].part && contacts[b].n.dot(contacts[a].n) > 0.999 {
+                    idx[cnt] = b;
+                    cnt += 1;
+                    done[b] = true;
+                }
+            }
+            if cnt < 2 {
+                continue;
+            }
+            let inv = 1.0 / cnt as f64;
+            let (mut rb, mut nb, mut tb) = (V3::ZERO, V3::ZERO, 0.0);
+            for &b in &idx[..cnt] {
+                let c = &contacts[b];
+                rb += c.r * inv;
+                nb += c.n * inv;
+                tb += inv * if c.gap >= 0.0 { -c.gap / dt } else { -c.gap / dt * DEPEN_VELOCITY_FRACTION };
+            }
+            let nb = nb.normalized();
+            let vn = (v + w.cross(rb)).dot(nb);
+            let rn = rb.cross(nb);
+            let kn = 1.0 / m + rn.dot(iinv_w(rn));
+            let lam = ((tb - vn) / kn).max(0.0);
+            for &b in &idx[..cnt] {
+                let c = &contacts[b];
+                let dl = lam * inv;
+                lam_n[b] += dl;
+                v += c.n * (dl / m);
+                w += iinv_w(c.r.cross(c.n)) * dl;
+            }
+        }
         for _ in 0..8 {
             for (ci, c) in contacts[..nc].iter().enumerate() {
                 let target = if c.gap >= 0.0 { -c.gap / dt } else { -c.gap / dt * DEPEN_VELOCITY_FRACTION };

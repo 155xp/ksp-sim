@@ -689,6 +689,34 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const float
             float ln[MAX_HULL]; F3 lt[MAX_HULL];
             for (int c = 0; c < nc; c++) { ln[c] = 0.f; lt[c] = f3(0, 0, 0); }
             const float minv = 1.f / m;
+            // patch warm start (sim.rs): one centroid constraint per part / normal, shared evenly
+            {
+                unsigned int done = 0u;
+                for (int a = 0; a < nc; a++) {
+                    if (done & (1u << a)) continue;
+                    int pa = (int)Pf[P_HULLPART + chull[a]];
+                    unsigned int grp = 0u; int cnt = 0;
+                    for (int b = a; b < nc; b++)
+                        if (!(done & (1u << b)) && (int)Pf[P_HULLPART + chull[b]] == pa && dot(cn[b], cn[a]) > 0.999f) { grp |= 1u << b; cnt++; }
+                    done |= grp;
+                    if (cnt < 2) continue;
+                    float inv = 1.f / cnt; F3 rb = f3(0, 0, 0), nb = f3(0, 0, 0); float tb = 0.f;
+                    for (int b = a; b < nc; b++) if (grp & (1u << b)) {
+                        rb = rb + cr[b] * inv; nb = nb + cn[b] * inv;
+                        tb += inv * (cgap[b] >= 0.f ? -cgap[b] / dtf : -cgap[b] / dtf * 0.55f);
+                    }
+                    nb = normalized(nb);
+                    float vn = dot(vb + dV + cross(w, rb), nb);
+                    F3 rn = cross(rb, nb);
+                    F3 irn = qrot(qq, mat_vec(ilinv, qrot(qconj(qq), rn)));
+                    float lam = fmaxf((tb - vn) / (minv + dot(rn, irn)), 0.f);
+                    for (int b = a; b < nc; b++) if (grp & (1u << b)) {
+                        float dl = lam * inv; ln[b] += dl;
+                        dV = dV + cn[b] * (dl * minv);
+                        w = w + qrot(qq, mat_vec(ilinv, qrot(qconj(qq), cross(cr[b], cn[b])))) * dl;
+                    }
+                }
+            }
             for (int it = 0; it < 8; it++) {
                 for (int c = 0; c < nc; c++) {
                     float target = cgap[c] >= 0.f ? -cgap[c] / dtf : -cgap[c] / dtf * 0.55f;

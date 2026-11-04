@@ -121,7 +121,10 @@ b = PointMassBatch(1 << 20, backend="cuda", dtype=np.float32, substeps=10)
 ## Not implemented / left
 
 * **Per-part joints:** the vessel is one rigid body. Joint flex is bounded (thrust-axis sag
-  ≤ 2e-4 rad), and post-impact sliding on hard impacts is 0.2–0.45 m over 5 s.
+  ≤ 2e-4 rad). Hard impacts drift 1–11 cm over 5 s, up to 0.2 m when one leg lands 3 ticks
+  ahead of the others.
+* **Suspension timing in multi-leg impacts:** the rate application and the grounded-leg count
+  are each one tick off from the game in transitions (VALIDATION_INGAME.md).
 * **Crash rule:** validated on vertical pad drops (9.7–39.7 m/s): 10 of 11 outcomes seeded from
   the game, 9 of 11 blind. Tilted and
   sideways impacts are not yet series-tested.
@@ -141,7 +144,8 @@ b = PointMassBatch(1 << 20, backend="cuda", dtype=np.float32, substeps=10)
     ≤ 2.7 cm / 0.84° in gimbal-heavy pad landings and hops.
   - Touchdown happens on the same tick as in the game in every trace, with 0.2–7.7 mm position
     error at touchdown.
-  - Soft pad landings stay within 5 cm 5 s later; hard impacts drift 0.2–0.45 m.
+  - Soft pad landings stay within 4 cm 5 s later. Hard impacts drift 1–11 cm, and 0.2 m in the
+    asymmetric 9.2 m/s drop.
   - Per-part drag and lift match the game to 4–5 significant figures; the PhysX wheel
     spring/damper/target match exactly.
 * **Constants** (VALIDATION.md): radius, GM, SOI, sidereal day etc. to ≤ 1.5e-5 relative.
@@ -165,6 +169,6 @@ Full 6-DOF hopper, GPU (`bench/bench_cuda_full.py`, 5 ticks per launch):
 
 | kernel | reset | 65 536 envs | 1 048 576 envs | vs CPU at 65 536 |
 |---|---|---|---|---|
-| mixed (default) | default (600–1500 m) | 246 M ticks/s | 283 M ticks/s | 17–20x |
-| mixed | near ground (2–30 m) | 137 M ticks/s | 151 M ticks/s | 10x |
+| mixed (default) | default (600–1500 m) | 258 M ticks/s | 279 M ticks/s | 18–20x |
+| mixed | near ground (2–30 m) | 130 M ticks/s | 142 M ticks/s | 9–10x |
 | f64 reference | default | 37 M ticks/s | 41 M ticks/s | 2.9x |

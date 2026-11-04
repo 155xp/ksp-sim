@@ -109,7 +109,11 @@ Traces seed them from the logged values. Training resets can randomize them (`gr
      (Smooth curve (0.01, 0.1), (2, 1), (7, 1), with Fext = −0.5·(F/g)·V/dt lerped at 10·dt).
    - **Hull points:** the collider extremes from the geometry dump. They feed a sequential-impulse
      solve (8 iterations, inelastic, speculative within contactOffset 0.01 m, depenetration at
-     0.55 of the gap per tick).
+     0.55 of the gap per tick). Contacts of one part with the same normal (e.g. the four
+     bell-rim points) are first solved as one constraint at their centroid, with the impulse
+     shared evenly, then refined per point. Plain Gauss-Seidel puts an even impact on the first
+     points it visits, rotating the craft and kicking it sideways through friction; the game
+     shows no such kick (crash series: 0.38 → 0.11 m after 5 s at 16 m/s).
    - **Crash, as `Part.OnCollisionEnter` → `HandleCollision`:** a contact that starts this tick
      (per-env hull bitmask) on a part's primary collider destroys the vessel if that part's
      rigidbody speed exceeds its `crashTolerance`. The primary collider is `Part.collider`, from
@@ -131,8 +135,10 @@ Traces seed them from the logged values. Training resets can randomize them (`gr
 The current list, each item with its measured bound against the running game, is in
 VALIDATION_INGAME.md ("What is still not 1:1"). In short:
 - the vessel is one rigid body (joint flex, i.e. thrust-axis sag ≤ 2e-4 rad, is noise);
-- the contact solver is sequential impulses on the composite (post-impact sliding 0.2–0.45 m
-  over 5 s on hard impacts, ≤ 5 cm on soft pad landings);
+- the contact solver is sequential impulses on the composite with a patch warm start: hard
+  impacts drift 1–11 cm over 5 s (0.2 m for the drop below), soft pad landings ≤ 4 cm;
+- in multi-leg impacts, the suspension rate change and the grounded-leg count switch one tick
+  off from the game;
 - the crash rule matches 10 of 11 in-game pad drops (9.7–39.7 m/s); tilted impacts are not yet
   series-tested;
 - yaw response during fast gimbal ramps is off by ~7%;

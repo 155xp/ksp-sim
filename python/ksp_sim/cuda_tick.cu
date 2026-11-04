@@ -562,6 +562,34 @@ extern "C" __global__ void tick_kernel(const double* __restrict__ P, const doubl
             SV(S_HTOUCH) = (double)touch;
             double ln[MAX_HULL]; V3 lt[MAX_HULL];
             for (int c = 0; c < nc; c++) { ln[c] = 0.0; lt[c] = v3(0, 0, 0); }
+            // patch warm start (sim.rs): one centroid constraint per part / normal, shared evenly
+            {
+                unsigned int done = 0u;
+                for (int a = 0; a < nc; a++) {
+                    if (done & (1u << a)) continue;
+                    int pa = (int)P[P_HULLPART + chull[a]];
+                    unsigned int grp = 0u; int cnt = 0;
+                    for (int b = a; b < nc; b++)
+                        if (!(done & (1u << b)) && (int)P[P_HULLPART + chull[b]] == pa && dot(cn[b], cn[a]) > 0.999) { grp |= 1u << b; cnt++; }
+                    done |= grp;
+                    if (cnt < 2) continue;
+                    double inv = 1.0 / cnt; V3 rb = v3(0, 0, 0), nb = v3(0, 0, 0); double tb = 0.0;
+                    for (int b = a; b < nc; b++) if (grp & (1u << b)) {
+                        rb = rb + cr[b] * inv; nb = nb + cn[b] * inv;
+                        tb += inv * (cgap[b] >= 0.0 ? -cgap[b] / dt : -cgap[b] / dt * 0.55);
+                    }
+                    nb = normalized(nb);
+                    double vn = dot(vv + cross(w, rb), nb);
+                    V3 rn = cross(rb, nb);
+                    V3 irn; mat_vec(ilinv, qrot(qconj(qq), rn), &irn); irn = qrot(qq, irn);
+                    double lam = fmax((tb - vn) / (1.0 / m + dot(rn, irn)), 0.0);
+                    for (int b = a; b < nc; b++) if (grp & (1u << b)) {
+                        double dl = lam * inv; ln[b] += dl;
+                        vv = vv + cn[b] * (dl / m);
+                        V3 ij; mat_vec(ilinv, qrot(qconj(qq), cross(cr[b], cn[b])), &ij); w = w + qrot(qq, ij) * dl;
+                    }
+                }
+            }
             for (int it = 0; it < 8; it++) {
                 for (int c = 0; c < nc; c++) {
                     double target = cgap[c] >= 0.0 ? -cgap[c] / dt : -cgap[c] / dt * 0.55;

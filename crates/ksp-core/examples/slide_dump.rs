@@ -17,7 +17,16 @@ fn main() {
     for j in td - 100..td + 120 {
         sim::tick(&spec, &prm, &mut st, &control(&t, j));
         let k = j + 1;
-        if std::env::var("HULL").is_ok() && k >= td && k <= td + 4 {
+        if std::env::var("LEGS").is_ok() && k >= td && k <= td + 6 {
+            for m in 0..spec.n_legs as usize {
+                let g = |n: &str| c.c(&format!("{n}"))[k];
+                println!("   tick {k} leg {m}: game cd {:.4} F {:.2} k {} c {} | mod spr {} dmp {} vp_k {} vp_c {} rtk {} rtc {} ab {} | sim x {:.4} F {:.2} k {} c {} | spr {} dmp {} rate {} drate {} rt {} rtd {} ab {}",
+                    g(&format!("ws{m}_cd")), g(&format!("wc{m}_force")), g(&format!("wc{m}_spring")), g(&format!("wc{m}_damper")),
+                    g(&format!("ws{m}_spring")), g(&format!("ws{m}_damper")), g(&format!("ws{m}_vp_k")), g(&format!("ws{m}_vp_c")), g(&format!("ws{m}_vp_rtk")), g(&format!("ws{m}_vp_rtc")), g(&format!("ws{m}_ab")),
+                    st.legs[m].x, st.legs[m].hit_force, st.legs[m].k, st.legs[m].c, st.legs[m].m_spring, st.legs[m].m_damper, st.legs[m].rate, st.legs[m].drate, st.legs[m].rt, st.legs[m].rtd, st.legs[m].auto_boost);
+            }
+        }
+        if std::env::var("HULL").is_ok() && k >= td && k <= td + 8 {
             let sc = sim::Scenery { shift: st.ground_shift, ksc_dz: st.ksc_dz };
             for h in 0..spec.n_hull as usize {
                 let p = st.x + st.q.rotate(spec.hull[h]);

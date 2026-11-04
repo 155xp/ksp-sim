@@ -47,6 +47,7 @@ reset distribution, random actions. CPU reference: 14.1 M env-ticks/s at 65 536 
 | G7 | mixed kernel: terrain queries in float in a local frame at the pad, heights relative to the origin height (exact expansion of the radius, no 600 km / 72 m magnitudes in float) | 246 M / 283 M | 20.1x |
 
 | G8 | crash rule from the game (primary-collider contacts only, collision-enter speed): 6 more hull points (Swivel Col5), per-env contact bitmask | 251 M / 278 M | 19.7x |
+| G9 | contact patch warm start (accuracy; post-impact drift 0.38 -> 0.11 m at 16 m/s) | 258 M / 279 M | 19.8x |
 
 Near-ground start (2-30 m: leg rays, terrain, contact solve), mixed kernel, 65 536 / 1 048 576 envs:
 G5 43 M / 46 M ticks/s -> G7 137 M / 151 M ticks/s (3.3x; the f64 sphere-ground path was 125 M)
