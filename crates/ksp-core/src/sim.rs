@@ -37,6 +37,8 @@ pub const VEL_SMOOTH_LEN: usize = 10;
 pub const MAX_VEL_DELTA_SQR: f32 = 1e6;
 /// Physics.cfg maxAngularVelocity (rad/s).
 pub const MAX_ANGULAR_VELOCITY: f64 = 50.0;
+/// Ticks between refreshes of the sun/latitude temperature offset (sun moves 0.0003 deg/tick).
+pub const TEMP_OFFSET_TICKS: u32 = 25;
 /// Physics.cfg orbitDriftFramesToWait.
 pub const ORBIT_DRIFT_FRAMES_TO_WAIT: u8 = 5;
 
@@ -83,6 +85,8 @@ pub struct EnvState {
     pub ticks: u32,
     /// max normal impact speed seen this step (diagnostics)
     pub impact_speed: f32,
+    /// cached GetAtmoThermalStats temperature offset (K); NaN = recompute
+    pub toff: f32,
 }
 
 /// Pilot input, as `FlightCtrlState` (mainThrottle, pitch, yaw, roll) in [0,1] / [-1,1].
@@ -171,10 +175,8 @@ pub fn sun_dir_fixed(b: &RawBody, ut: f64) -> (V3, f64) {
     };
     let (r, _) = el.state_at(sun.gm(), ut);
     let d = -r.normalized();
-    let ta = {
-        let pe = el.state_at(sun.gm(), el.epoch - el.mean_anomaly_at_epoch / el.mean_motion(sun.gm())).0;
-        r.y.atan2(r.x) - pe.y.atan2(pe.x)
-    };
+    // true anomaly: angle from periapsis direction (LAN + argPe for these equatorial orbits)
+    let ta = r.y.atan2(r.x) - (el.lan_deg + el.arg_pe_deg).to_radians();
     (rot_z(d, -rotation_angle(b, ut)), ta.to_degrees())
 }
 
@@ -286,13 +288,18 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     let spd = v_smooth.norm();
     let alt = x_com.norm() - b.radius;
     info.alt = alt;
-    let toff = if prm.sun_temperature && b.atmosphere && alt < b.atmosphere_depth {
-        let (sun, ta) = sun_dir_fixed(b, st.ut);
-        let up_f = if rot_frame { x_com } else { rot_z(x_com, -rotation_angle(b, st.ut)) }.normalized();
-        atmo::temperature_offset(b, sun, up_f, v3(0.0, 0.0, 1.0), ta, None)
+    // FlightIntegrator.CalculateSunBodyFlux runs from Update() (once per rendered frame), not per
+    // FixedUpdate; we refresh it every TEMP_OFFSET_TICKS ticks (0.5 s), far below its rate of change.
+    if prm.sun_temperature && b.atmosphere && alt < b.atmosphere_depth {
+        if st.ticks % TEMP_OFFSET_TICKS == 0 || st.toff.is_nan() {
+            let (sun, ta) = sun_dir_fixed(b, st.ut);
+            let up_f = if rot_frame { x_com } else { rot_z(x_com, -rotation_angle(b, st.ut)) }.normalized();
+            st.toff = atmo::temperature_offset(b, sun, up_f, v3(0.0, 0.0, 1.0), ta, None) as f32;
+        }
     } else {
-        0.0
-    };
+        st.toff = 0.0;
+    }
+    let toff = if prm.sun_temperature { st.toff as f64 } else { 0.0 };
     let atm = atmo::atm_state(b, alt, spd, toff);
     info.atm = atm;
 
@@ -388,8 +395,11 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 };
                 let a = f.area[j] * s;
                 area += a;
-                let cdc = spec.part_face_cd_curve[i][j];
-                let cd = if cdc.is_nan() { f.drag[j] } else { cdc.powf(mt.cd_pow) };
+                if a == 0.0 {
+                    continue;
+                }
+                let lcd = spec.part_face_ln_cd[i][j];
+                let cd = if lcd.is_nan() { f.drag[j] } else { (mt.cd_pow * lcd).exp() };
                 area_drag += a * cd;
                 if dot > 0.0 && spec.part_body_lift[i] != 0.0 {
                     let l = dot * f.area[j] * f.drag[j] * (eval(BODY_LIFT_CURVE, dot as f32 as f64) as f32 as f64);
@@ -651,7 +661,7 @@ pub fn state_at_pad(spec: &VesselSpec, enu: V3, v_enu: V3, q: Quat, w: V3, ut: f
     let res = spec.full_resources();
     let (_, com_l, _) = spec.mass_props(&res);
     let r = q.rotate(com_l);
-    let mut st = EnvState { ut, x: x_com - r, v: v_com - w.cross(r), q, w, res, ..Default::default() };
+    let mut st = EnvState { ut, x: x_com - r, v: v_com - w.cross(r), q, w, res, toff: f32::NAN, ..Default::default() };
     prime_smoother(&mut st, v_com);
     st
 }

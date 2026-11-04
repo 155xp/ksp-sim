@@ -118,11 +118,13 @@ pub struct VesselSpec {
     pub part_com: [V3; MAX_PARTS],
     pub part_cop: [V3; MAX_PARTS],
     pub part_rot: [Quat; MAX_PARTS],
-    /// diagonal box inertia per tonne (part-local), from cube size
+    /// box inertia per tonne (part-local diagonal), from cube size
     pub part_inertia_per_t: [V3; MAX_PARTS],
+    /// the same, rotated into the root frame (3x3 per tonne)
+    pub part_inertia_root: [[[f64; 3]; 3]; MAX_PARTS],
     pub part_faces: [AeroFaces; MAX_PARTS],
-    /// DRAG_CD(face Cd) is mach-independent: precomputed per face (NaN marks Cd >= 1)
-    pub part_face_cd_curve: [[f64; 6]; MAX_PARTS],
+    /// ln(DRAG_CD(face Cd)) (mach-independent; Cd' = exp(pow(M) * this)); NaN marks Cd >= 1
+    pub part_face_ln_cd: [[f64; 6]; MAX_PARTS],
     pub part_body_lift: [f64; MAX_PARTS],
     pub part_angular_drag: [f64; MAX_PARTS],
     pub res_cap_total: [f64; N_RES],
@@ -153,7 +155,8 @@ impl VesselSpec {
             part_rot: [Quat::IDENTITY; MAX_PARTS],
             part_inertia_per_t: [V3::ZERO; MAX_PARTS],
             part_faces: [AeroFaces::default(); MAX_PARTS],
-            part_face_cd_curve: [[f64::NAN; 6]; MAX_PARTS],
+            part_face_ln_cd: [[f64::NAN; 6]; MAX_PARTS],
+            part_inertia_root: [[[0.0; 3]; 3]; MAX_PARTS],
             part_body_lift: [0.0; MAX_PARTS],
             part_angular_drag: [0.0; MAX_PARTS],
             res_cap_total: [0.0; N_RES],
@@ -181,6 +184,19 @@ impl VesselSpec {
             s.part_rot[i] = p.rot;
             let z = d.cube.size;
             s.part_inertia_per_t[i] = v3(z.y * z.y + z.z * z.z, z.x * z.x + z.z * z.z, z.x * z.x + z.y * z.y) / 12.0;
+            let ib = s.part_inertia_per_t[i];
+            let axes = [p.rot.rotate(v3(1.0, 0.0, 0.0)), p.rot.rotate(v3(0.0, 1.0, 0.0)), p.rot.rotate(v3(0.0, 0.0, 1.0))];
+            let ibv = [ib.x, ib.y, ib.z];
+            for a in 0..3 {
+                for b in 0..3 {
+                    s.part_inertia_root[i][a][b] = (0..3)
+                        .map(|k| {
+                            let ak = [axes[k].x, axes[k].y, axes[k].z];
+                            ibv[k] * ak[a] * ak[b]
+                        })
+                        .sum();
+                }
+            }
             // occlusion by stack neighbours (DragCubeList.SetPartOcclusion)
             let mut f = AeroFaces::from(&d.cube);
             for &(j, ndir) in &p.stack {
@@ -191,7 +207,7 @@ impl VesselSpec {
             s.part_faces[i] = f;
             for k in 0..6 {
                 if f.drag[k] < 1.0 {
-                    s.part_face_cd_curve[i][k] = crate::curve::eval(crate::aero::DRAG_CD, f.drag[k] as f32 as f64) as f32 as f64;
+                    s.part_face_ln_cd[i][k] = (crate::curve::eval(crate::aero::DRAG_CD, f.drag[k] as f32 as f64) as f32 as f64).ln();
                 }
             }
             s.part_body_lift[i] = if d.body_lift { 1.0 } else { 0.0 };
@@ -294,26 +310,13 @@ impl VesselSpec {
         for i in 0..self.n_parts as usize {
             let mi = m_parts[i];
             let d = self.part_com[i] - com;
-            // part box inertia rotated to root frame (parts here are axis-aligned about Y)
-            let ib = self.part_inertia_per_t[i] * mi;
-            let r = &self.part_rot[i];
-            let ex = r.rotate(v3(1.0, 0.0, 0.0));
-            let ey = r.rotate(v3(0.0, 1.0, 0.0));
-            let ez = r.rotate(v3(0.0, 0.0, 1.0));
-            let axes = [ex, ey, ez];
-            let ibv = [ib.x, ib.y, ib.z];
             let dv = [d.x, d.y, d.z];
             let d2 = d.norm2();
+            let ir = &self.part_inertia_root[i];
             for a in 0..3 {
                 for b in 0..3 {
-                    let mut v = 0.0;
-                    for k in 0..3 {
-                        let ak = [axes[k].x, axes[k].y, axes[k].z];
-                        v += ibv[k] * ak[a] * ak[b];
-                    }
-                    let delta = if a == b { 1.0 } else { 0.0 };
-                    v += mi * (d2 * delta - dv[a] * dv[b]);
-                    it[a][b] += v;
+                    let delta = if a == b { d2 } else { 0.0 };
+                    it[a][b] += ir[a][b] * mi + mi * (delta - dv[a] * dv[b]);
                 }
             }
         }
