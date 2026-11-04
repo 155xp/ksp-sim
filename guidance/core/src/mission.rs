@@ -179,6 +179,9 @@ pub struct Stats {
     pub max_q_descent: f64,
     pub gfold_solves: u32,
     pub gfold_fail: u32,
+    /// descent trim burns flown, and their total delta-v (m/s)
+    pub trim_burns: u32,
+    pub trim_dv: f64,
 }
 
 /// Recorded trajectory sample: t, pad-ENU x/y/z (tangent frame at the pad), phase, throttle.
@@ -215,6 +218,11 @@ pub struct Flight {
     aoa: (f64, f64),
     entry_dir: V3,
     contact_t: f64,
+    /// boostback aim offset from the pad (east, north, m): long when the return arc stays in the
+    /// thick air, so the leftover error is a shortfall a retro trim can remove
+    aim_bias: (f64, f64),
+    /// time limit of the current boostback / trim burn (s, phase time)
+    burn_limit: f64,
     hold_h: f64,
     t_settle: f64,
     last_thrust: f64,
@@ -267,6 +275,8 @@ impl Flight {
             aoa: (0.0, 0.0),
             entry_dir: pad.u,
             contact_t: 0.0,
+            aim_bias: (0.0, 0.0),
+            burn_limit: f64::INFINITY,
             hold_h: 2.0,
             t_settle: 1.0,
             last_thrust: 0.0,
@@ -322,8 +332,14 @@ impl Flight {
         predict(&c, &PredOpts { aoa, aoa_torque, burn: Some(self.burn_model()), sim_offset: true, ..Default::default() }, n.x, v, m)
     }
 
+    /// Touchdown error vs the current aim point (pad + boostback bias while boosting back).
     fn pip_err(&self, p: &PredResult) -> (f64, f64) {
-        Pad::ksc().ground_offset(p.x)
+        let (e, n) = Pad::ksc().ground_offset(p.x);
+        if matches!(self.phase, Phase::Flip | Phase::Boostback) && self.stats.trim_burns == 0 {
+            (e - self.aim_bias.0, n - self.aim_bias.1)
+        } else {
+            (e, n)
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -341,7 +357,7 @@ impl Flight {
         let m_b = nb.m;
         let have = m_b - self.sh.m_dry;
         let guess = if self.bb_dv.norm2() > 0.0 { self.bb_dv } else { self.boostback_guess(&nb) };
-        let Some((dv, err)) = self.solve_boostback(&nb, guess, m_b) else {
+        let Some((dv, err)) = self.solve_boostback(&nb, guess, m_b, None) else {
             if debug() {
                 eprintln!("  budget: boostback solve failed");
             }
@@ -412,7 +428,9 @@ impl Flight {
 
     /// Newton (min-norm, 3 unknowns / 2 equations) on the powered touchdown error vs an
     /// impulsive velocity change, warm-started from `guess`.
-    fn solve_boostback(&self, n: &Nav, guess: V3, m: f64) -> Option<(V3, f64)> {
+    /// `align`: instead of the minimum-norm member of the 1-D solution family, pick the one best
+    /// aligned with this direction (used while burning, so trimming never needs another flip).
+    fn solve_boostback(&self, n: &Nav, guess: V3, m: f64, align: Option<V3>) -> Option<(V3, f64)> {
         let mut dv = guess;
         let mut last_err = f64::INFINITY;
         for _it in 0..10 {
@@ -451,9 +469,20 @@ impl Flight {
             let l0 = (d * e0.0 - b * e0.1) / det;
             let l1 = (-b * e0.0 + a * e0.1) / det;
             let mut step = -(r0 * l0 + r1 * l1);
-            // pull toward the minimum-norm solution along the null direction of J
             let nul = r0.cross(r1).normalized();
-            step -= nul * (0.5 * nul.dot(dv + step));
+            match align {
+                // move along the null direction to minimise the part of dv off the axis
+                Some(u) => {
+                    let d = dv + step;
+                    let pd = d - u * d.dot(u);
+                    let pn = nul - u * nul.dot(u);
+                    if pn.norm2() > 1e-12 {
+                        step -= nul * (pd.dot(pn) / pn.norm2());
+                    }
+                }
+                // pull toward the minimum-norm solution
+                None => step -= nul * (0.5 * nul.dot(dv + step)),
+            }
             let sn = step.norm();
             if sn > 300.0 {
                 step = step * (300.0 / sn);
@@ -485,12 +514,17 @@ impl Flight {
         ));
         let e0 = effectiveness(spec, &self.st, n, 0.0);
         let e1 = effectiveness(spec, &self.st, n, 1.0);
+        // the aero moment at this state eats into the authority (worst case: it opposes)
+        let atm = atm_at(n.alt, n.v.norm(), self.st.toff as f64);
+        let (_, tq) = aero_force(spec, n.com_l, n.q, n.v, V3::ZERO, &atm);
+        let a_aero = n.q.conj().rotate(tq).norm() / i_n;
+        let need = alpha_need + 1.5 * a_aero;
         let a_rw = capacity(&e0.b, axis) / i_n;
         let a_g = (capacity(&e1.b, axis) - capacity(&e0.b, axis)) / i_n;
-        if a_rw >= alpha_need || a_g <= 0.0 {
+        if a_rw >= need || a_g <= 0.0 {
             return 0.0;
         }
-        ((alpha_need - a_rw) / a_g).clamp(0.0, 1.0)
+        ((need - a_rw) / a_g).clamp(0.0, 1.0)
     }
 
     // ---------------------------------------------------------------------------------------
@@ -512,6 +546,13 @@ impl Flight {
     }
 
     fn descent_guidance(&mut self, n: &Nav) {
+        // the predictor assumes an engine-first attitude: while the booster is still swinging
+        // round (e.g. right after an in-atmosphere boostback) its predictions are meaningless
+        let aoa_now = n.up.dot(-n.v.normalized()).clamp(-1.0, 1.0).acos().to_degrees();
+        if aoa_now > 30.0 {
+            self.aoa = (0.0, 0.0);
+            return;
+        }
         let p0 = self.pip(n, V3::ZERO, self.aoa);
         if !p0.ok {
             return;
@@ -542,6 +583,29 @@ impl Flight {
         let m = (a.0 * a.0 + a.1 * a.1).sqrt();
         if m > amax {
             a = (a.0 * amax / m, a.1 * amax / m);
+        }
+        // steering saturated and still well off: a short trim burn along (within 20 deg of) the
+        // current thrust axis, solved like the boostback, if the propellant budget allows
+        let en = (e0.0 * e0.0 + e0.1 * e0.1).sqrt();
+        if m >= amax * 0.99 && en > 30.0 && aoa_now < 20.0 && n.alt > p0.ign_h + 2000.0 && self.stats.trim_burns < 3 {
+            if let Some((dv, err)) = self.solve_boostback(n, n.up * 2.0, n.m, Some(n.up)) {
+                let ang = dv.normalized().dot(n.up).clamp(-1.0, 1.0).acos();
+                let ve = propulsion(self.spec(), p_atm(n.alt)).isp * ENGINE_G0;
+                let spare = n.m - self.sh.m_dry - 1.3 * (n.m - p0.m);
+                let cost = n.m * (1.0 - (-dv.norm() / ve).exp());
+                if debug() {
+                    eprintln!("  trim? e {en:.0} -> {err:.1} dv {:.1} ang {:.1} cost {cost:.2} spare {spare:.2}", dv.norm(), ang.to_degrees());
+                }
+                if err < 0.3 * en && ang < 20f64.to_radians() && cost < 0.5 * spare {
+                    self.bb_dv = dv;
+                    self.stats.trim_burns += 1;
+                    self.stats.trim_dv += dv.norm();
+                    let pr = propulsion(self.spec(), p_atm(n.alt));
+                    self.set_phase(Phase::Boostback);
+                    self.burn_limit = 2.0 * crate::predict::burn_time(pr.thrust, pr.isp, n.m, dv.norm()) + 3.0;
+                    return;
+                }
+            }
         }
         if debug() {
             let tilt = n.up.dot(-n.v.normalized()).clamp(-1.0, 1.0).acos().to_degrees();
@@ -847,12 +911,24 @@ impl Flight {
                 if due {
                     self.guid_timer = if self.phase == Phase::Flip { 0.5 } else { 0.2 };
                     let guess = if self.bb_dv.norm2() > 0.0 { self.bb_dv } else { self.boostback_guess(&n) };
-                    match self.solve_boostback(&n, guess, n.m) {
+                    // final trim only: keep the residual on the thrust axis
+                    let trim = self.phase == Phase::Boostback && (self.stats.trim_burns > 0 || self.bb_dv.norm() < (0.05 * self.stats.bb_dv_plan).max(5.0));
+                    let align = if trim { Some(n.up) } else { None };
+                    match self.solve_boostback(&n, guess, n.m, align) {
                         Some((dv, _err)) => {
                             self.bb_dv = dv;
                             self.bb_fail = 0;
                             if self.stats.bb_dv_plan == 0.0 {
                                 self.stats.bb_dv_plan = dv.norm();
+                                // arc apogee in the dense air: aim past the pad by 5 % of the
+                                // current downrange (<= 800 m)
+                                let p = self.pip(&n, dv, (0.0, 0.0));
+                                if p.ok && p.apo < 50_000.0 {
+                                    let (de, dn) = Pad::ksc().ground_offset(n.x);
+                                    let d = (de * de + dn * dn).sqrt().max(1.0);
+                                    let b = (0.05 * d).min(800.0);
+                                    self.aim_bias = (-de / d * b, -dn / d * b);
+                                }
                             }
                         }
                         None => self.bb_fail += 1,
@@ -880,11 +956,24 @@ impl Flight {
                     let thr = (dvn * n.m / (pr.thrust * tau_end)).clamp(0.0, 1.0);
                     self.cmd_thr = if err < 20f64.to_radians() { thr.max(pr.throttle_min) } else { 0.05 };
                     let (p_left, _) = propellant(self.spec(), &self.st.res);
-                    // done: residual below 0.25 m/s, or a small residual (1 % of the plan, >= 1 m/s)
-                    // that points off the thrust axis (chasing it would mean another flip; the
-                    // descent steering and landing divert take it)
-                    let small = dvn < (0.01 * self.stats.bb_dv_plan).max(1.0);
-                    if dvn < 0.25 || (small && err > 20f64.to_radians()) || p_left <= 1e-6 || self.bb_fail > 25 {
+                    // done: residual below 0.25 m/s; or the residual points off the thrust axis
+                    // (chasing it would mean another flip) and is either tiny or already worth
+                    // less than 20 m at the pad (descent steering and the landing divert take it);
+                    // or the burn has run far past its plan
+                    let off_axis = err > 20f64.to_radians();
+                    let pip_ok = off_axis && {
+                        let pp = self.pip(&n, V3::ZERO, (0.0, 0.0));
+                        let e = self.pip_err(&pp);
+                        (e.0 * e.0 + e.1 * e.1).sqrt() < 20.0
+                    };
+                    let t_plan = crate::predict::burn_time(pr.thrust, pr.isp, self.stats.sep_mass, self.stats.bb_dv_plan);
+                    // in trim mode the residual is kept on the axis; pointing backwards = overshot
+                    let overshot = (self.stats.trim_burns > 0 || dvn < (0.05 * self.stats.bb_dv_plan).max(5.0)) && self.bb_dv.dot(n.up) <= 0.0;
+                    let limit = if self.stats.trim_burns > 0 { self.burn_limit } else { 2.0 * t_plan + 30.0 };
+                    // a trim never runs into the landing burn
+                    let (rr, _, _) = self.landing_state(&n);
+                    let landing_due = self.stats.trim_burns > 0 && landing_need(self.spec(), &self.sh.tables, self.st.toff as f64, n.x, n.v, n.m, rr.z, self.cfg.v_td).0 >= 0.8 * self.f_ign_eff(n.m);
+                    if dvn < 0.25 || overshot || landing_due || (off_axis && dvn < 0.5) || pip_ok || self.t_phase > limit || p_left <= 1e-6 || self.bb_fail > 25 {
                         let m_sep = self.stats.sep_mass;
                         let ve = propulsion(self.spec(), 0.0).isp * ENGINE_G0;
                         self.stats.bb_dv_used = ve * (m_sep / n.m).ln();
@@ -922,7 +1011,9 @@ impl Flight {
                     }
                 }
                 self.cmd_dir = self.entry_dir;
-                if n.alt < KERBIN.atmosphere_depth && vz < 0.0 {
+                // in the air (descending, or a low apogee still inside the atmosphere): steer
+                let _ = vz;
+                if n.alt < KERBIN.atmosphere_depth {
                     let pp = self.pip(&n, V3::ZERO, (0.0, 0.0));
                     let e = self.pip_err(&pp);
                     self.stats.entry_err = (e.0 * e.0 + e.1 * e.1).sqrt();
@@ -931,6 +1022,7 @@ impl Flight {
             }
             Phase::Descent => {
                 self.cmd_thr = 0.0;
+                self.stats.apo_alt = self.stats.apo_alt.max(n.alt);
                 let atm = atm_at(n.alt, n.v.norm(), self.st.toff as f64);
                 self.stats.max_q_descent = self.stats.max_q_descent.max(atm.q_kpa);
                 if due {

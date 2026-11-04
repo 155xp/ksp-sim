@@ -85,8 +85,9 @@ pub struct PredResult {
     pub ok: bool,
     /// true if the modelled burn ran out of propellant
     pub dry: bool,
-    /// max dynamic pressure along the path (kPa)
+    /// max dynamic pressure along the path (kPa) and highest altitude reached (m)
     pub max_q: f64,
+    pub apo: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -272,6 +273,7 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
         let nv = s.v + (a1 + a2 * 2.0 + a3 * 2.0 + a4) * (dt / 6.0);
         let nm = (s.m + (m1 + 2.0 * m2 + 2.0 * m3 + m4) * (dt / 6.0)).max(c.m_dry.min(s.m));
         res.max_q = res.max_q.max(q1);
+        res.apo = res.apo.max(alt);
         let nh = height(c, nx);
         if let Some(sa) = o.stop_alt {
             if nx.norm() - KERBIN.radius < sa && nv.dot(nx) < 0.0 {
