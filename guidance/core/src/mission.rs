@@ -186,6 +186,8 @@ pub type RecSample = [f32; 6];
 
 /// The landing divert aims to be done this long before touchdown (s).
 pub const TAIL_S: f64 = 3.0;
+/// Highest planned landing-burn deceleration (in g above hover).
+pub const MAX_LANDING_G: f64 = 3.0;
 
 /// Terminal-phase observation for an external policy (see `Flight::terminal_obs`).
 pub const TERM_OBS_DIM: usize = 20;
@@ -213,6 +215,7 @@ pub struct Flight {
     aoa: (f64, f64),
     entry_dir: V3,
     contact_t: f64,
+    hold_h: f64,
     last_thrust: f64,
     prop_at_ign: f64,
     pub gplan: Option<gfold::Plan>,
@@ -263,6 +266,7 @@ impl Flight {
             aoa: (0.0, 0.0),
             entry_dir: pad.u,
             contact_t: 0.0,
+            hold_h: 2.0,
             last_thrust: 0.0,
             prop_at_ign: 0.0,
             gplan: None,
@@ -283,8 +287,16 @@ impl Flight {
         PredCraft { spec: &self.sh.built.booster, tables: &self.sh.tables, m_dry: self.sh.m_dry, h_td: touchdown_height(&self.sh.built.booster, n.com_l), toff: self.st.toff as f64, body_x: n.q.rotate(v3(1.0, 0.0, 0.0)) }
     }
 
+    /// Ignition throttle actually used: the configured fraction, but never planning a landing
+    /// deceleration above MAX_LANDING_G (a high-TWR booster otherwise gets a burn too short to
+    /// divert and settle its attitude). `m` is the landing mass estimate.
+    fn f_ign_eff(&self, m: f64) -> f64 {
+        self.burn_model().threshold(m)
+    }
+
     fn burn_model(&self) -> LandingBurnModel {
-        LandingBurnModel { f_ign: self.cfg.f_ign, v_td: self.cfg.v_td }
+        let t_pad = propulsion(&self.sh.built.booster, p_atm(ksc::KSC_PAD_DECK_ALT)).thrust;
+        LandingBurnModel { f_ign: self.cfg.f_ign, max_g: MAX_LANDING_G, t_pad, v_td: self.cfg.v_td }
     }
 
     fn set_phase(&mut self, p: Phase) {
@@ -590,7 +602,30 @@ impl Flight {
     /// The stop is planned to end `hold_height` above touchdown; the last stretch is flown at the
     /// constant touchdown rate (~1.5 s of it), so touchdown speed doesn't hinge on the final metre.
     fn hold_height(&self) -> f64 {
-        1.5 * self.cfg.v_td.max(1.0)
+        self.hold_h
+    }
+
+    /// Height of the constant-rate final segment: 1.5 s plus the time this craft needs to swing
+    /// 10 degrees at hover throttle (wheels + gimbal), so it can still null drift there.
+    fn update_hold_height(&mut self, n: &Nav) {
+        let pr = propulsion(self.spec(), p_atm(n.alt));
+        let u_h = (n.m * 9.81 / pr.thrust.max(1e-9)).clamp(0.05, 1.0);
+        let e = effectiveness(self.spec(), &self.st, n, u_h);
+        let ixx = n.inertia_l[0][0].min(n.inertia_l[2][2]).max(1e-9);
+        let alpha = capacity(&e.b, v3(1.0, 0.0, 0.0)).min(capacity(&e.b, v3(0.0, 0.0, 1.0))) / ixx;
+        let t_settle = 2.0 * (2.0 * 10f64.to_radians() / alpha.max(1e-6)).sqrt();
+        self.hold_h = self.cfg.v_td.max(0.5) * (1.5 + t_settle).clamp(1.5, 8.0);
+    }
+
+    /// Max tilt at touchdown from the leg footprint: 30 % of the tip-over angle.
+    fn touchdown_tilt(&self, n: &Nav) -> f64 {
+        let spec = self.spec();
+        let r_feet = (0..spec.n_legs as usize).map(|k| (spec.legs[k].foot.x.powi(2) + spec.legs[k].foot.z.powi(2)).sqrt()).fold(f64::INFINITY, f64::min);
+        let h = touchdown_height(spec, n.com_l).max(0.1);
+        if !r_feet.is_finite() {
+            return 2f64.to_radians();
+        }
+        (0.3 * (r_feet / h).atan()).clamp(2f64.to_radians(), 8f64.to_radians())
     }
 
     fn stop(&self, n: &Nav) -> landing::Stop {
@@ -668,11 +703,29 @@ impl Flight {
         if debug() && self.st.ticks % 10 == 0 {
             eprintln!("     alloc q {:.1} M {:.2} a_w {:.1} a_p {:.2} -> alpha {:.2} deg u {:.2} got {:.2}", q, mach, a_w, a_p, alpha.to_degrees(), u, got);
         }
-        let mut dir = if t_hat.norm2() > 0.0 { w * alpha.cos() + t_hat * alpha.sin() } else { w };
-        // tilt limit from vertical: 30 deg high up, tapering to 4 deg for touchdown
+        // the box-shaped cubes also push sideways at off-axis azimuths: rotate the tilt plane
+        // about the flow axis so the side force cancels (two fixed-point passes)
+        let mut t_use = t_hat;
+        if t_hat.norm2() > 0.0 && q > 0.0 && alpha.abs() > 1e-4 {
+            let ad = alpha.to_degrees();
+            for _ in 0..2 {
+                let ph = crate::nav::tilt_azimuth(n.q.rotate(v3(1.0, 0.0, 0.0)), w, t_use * alpha.signum());
+                let cs = q * self.sh.tables.cs_at(mach, ad.abs(), Some(ph)) * alpha.signum();
+                let along = pr.thrust * u * alpha.sin() + q * self.sh.tables.cl_at(mach, ad.abs(), Some(ph)) * alpha.signum();
+                if along.abs() < 1e-9 {
+                    break;
+                }
+                let delta = (cs / along).atan();
+                let s_hat = w.cross(t_use);
+                t_use = (t_use * delta.cos() - s_hat * delta.sin()).normalized();
+            }
+        }
+        let mut dir = if t_use.norm2() > 0.0 { w * alpha.cos() + t_use * alpha.sin() } else { w };
+        // tilt limit from vertical: 30 deg high up, tapering to the leg-footprint limit
         let (r, _, _) = self.landing_state(n);
         let hh = self.hold_height();
-        let max_tilt = (4.0 + 26.0 * ((r.z - hh) / (6.0 * hh)).clamp(0.0, 1.0)).to_radians();
+        let td = self.touchdown_tilt(n);
+        let max_tilt = td + (30f64.to_radians() - td) * ((r.z - hh) / (4.0 * hh)).clamp(0.0, 1.0);
         let c = dir.dot(up);
         if c < max_tilt.cos() {
             let h = (dir - up * c).normalized();
@@ -858,7 +911,12 @@ impl Flight {
                 // ignition check (every tick once the quick estimate is close)
                 let (r, _, _) = self.landing_state(&n);
                 let (quick, _) = landing_need(self.spec(), &self.sh.tables, self.st.toff as f64, n.x, n.v, n.m, r.z, self.cfg.v_td);
-                if quick >= 0.4 * self.cfg.f_ign && self.stop(&n).u >= self.cfg.f_ign {
+                let f_ign = self.f_ign_eff(n.m);
+                if quick >= f_ign {
+                    self.update_hold_height(&n);
+                    if debug() {
+                        eprintln!("  ignition: quick {:.3} stop-solver {:.3} f_ign {:.3}", quick, self.stop(&n).u, f_ign);
+                    }
                     self.stats.ign_alt = n.alt;
                     self.stats.ign_speed = n.v.norm();
                     let pp = self.pip(&n, V3::ZERO, (0.0, 0.0));

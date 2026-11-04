@@ -11,3 +11,4 @@ pub mod attitude;
 pub mod gfold;
 pub mod mission;
 pub mod landing;
+pub mod fleet;

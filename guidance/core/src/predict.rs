@@ -34,10 +34,19 @@ pub struct PredCraft<'a> {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LandingBurnModel {
-    /// ignite when the throttle the suicide rule needs reaches this fraction
+    /// ignite when the throttle the burn needs reaches min(f_ign, max_g * g * m / T_pad)
     pub f_ign: f64,
+    pub max_g: f64,
+    /// thrust at the pad (kN), for the deceleration cap
+    pub t_pad: f64,
     /// target descent rate at touchdown (m/s)
     pub v_td: f64,
+}
+
+impl LandingBurnModel {
+    pub fn threshold(&self, m: f64) -> f64 {
+        if self.t_pad <= 0.0 { self.f_ign } else { self.f_ign.min(self.max_g * 9.81 * m / self.t_pad) }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -150,33 +159,47 @@ fn height(c: &PredCraft, x: V3) -> f64 {
     x.norm() - ground_r() - c.h_td
 }
 
-/// The landing-burn requirement at (x, v, m, h): the thrust acceleration that brings the vertical
-/// speed to `v_td` at h = 0 under constant deceleration while nulling horizontal velocity over the
-/// same time (drag, gravity included). Returns (throttle needed as a fraction of max thrust,
-/// thrust direction, body-fixed). The landing guidance ignites when the throttle reaches f_ign.
+/// The landing-burn requirement at (x, v, m, h): the constant throttle of a retrograde burn that
+/// brings the vessel from here to `v_td` at the touchdown height, from an energy balance along
+/// the path: thrust work = kinetic + potential energy - drag work. The drag work is integrated
+/// (8-point midpoint rule) through the real atmosphere below, with v^2 falling linearly along the
+/// path, so both the fading of drag as the vessel slows and its rise as the air thickens count.
+/// Thrust is taken at mid-burn pressure. Returns (throttle as a fraction of max thrust, thrust
+/// direction = -v_hat). Cheap enough to run every predictor step; within a few percent of the
+/// full constant-throttle stop solution (`landing::stop_throttle`).
 pub fn landing_need(spec: &VesselSpec, tables: &AeroTables, toff: f64, x: V3, v: V3, m: f64, h: f64, v_td: f64) -> (f64, V3) {
-    let up = x.normalized();
+    let r = x.norm();
+    let up = x / r;
     let vz = v.dot(up);
-    if vz >= -v_td {
+    let spd = v.norm();
+    if vz >= -v_td || spd < 1e-6 {
         return (0.0, up);
     }
-    let r = x.norm();
-    let g = KERBIN.gm() / (r * r);
-    let spd = v.norm();
-    let alt = r - KERBIN.radius;
-    let atm = atm_at(alt, spd, toff);
-    let drag = if atm.rho > 0.0 { v * (-(atm.q_kpa * tables.cd(atm.mach, 0.0) * atm.pseudo_re_drag_mult) / (m * spd)) } else { V3::ZERO };
+    let cos_t = (-vz / spd).max(0.05);
     let hh = h.max(0.1);
-    let a_z = (vz * vz - v_td * v_td) / (2.0 * hh);
-    let t_s = 2.0 * hh / (-vz + v_td);
-    let vh = v - up * vz;
-    let a_kin = up * a_z - vh / t_s;
-    let a_t = a_kin + up * g - drag;
-    let pr = propulsion(spec, p_atm(alt));
-    if pr.thrust <= 0.0 {
-        return (f64::INFINITY, up);
+    let path = hh / cos_t;
+    let alt0 = r - KERBIN.radius;
+    let g = KERBIN.gm() / (r * r);
+    let v0s = spd * spd;
+    let vfs = v_td * v_td / (cos_t * cos_t);
+    let mut w_drag = 0.0;
+    const N: usize = 8;
+    for k in 0..N {
+        let f = (k as f64 + 0.5) / N as f64;
+        let vs = (v0s - (v0s - vfs) * f).max(0.0);
+        let a = alt0 - hh * f;
+        let sp = vs.sqrt();
+        let atm = atm_at(a, sp, toff);
+        if atm.rho > 0.0 {
+            w_drag += atm.q_kpa * tables.cd(atm.mach, 0.0) * atm.pseudo_re_drag_mult * (path / N as f64);
+        }
     }
-    (m * a_t.norm() / pr.thrust, a_t.normalized())
+    let e_need = 0.5 * m * (v0s - vfs) + m * g * hh - w_drag;
+    let pr = propulsion(spec, p_atm(alt0 - 0.5 * hh));
+    if pr.thrust <= 0.0 {
+        return (f64::INFINITY, -v / spd);
+    }
+    ((e_need / (pr.thrust * path)).max(0.0), -v / spd)
 }
 
 /// Predict the trajectory from body-fixed CoM state (x, v) and mass m.
@@ -219,7 +242,7 @@ pub fn predict(c: &PredCraft, o: &PredOpts, x: V3, v: V3, m: f64) -> PredResult 
             if vz < 0.0 || ignited {
                 let (need, dir) = landing_need(c.spec, c.tables, c.toff, s.x, s.v, s.m, h, b.v_td);
                 bdir = dir;
-                if !ignited && need >= b.f_ign && alt < KERBIN.atmosphere_depth {
+                if !ignited && need >= b.threshold(s.m) && alt < KERBIN.atmosphere_depth {
                     ignited = true;
                     res.ign_h = h;
                     res.ign_t = t;

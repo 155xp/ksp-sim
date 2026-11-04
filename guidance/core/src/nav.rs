@@ -206,8 +206,11 @@ pub struct AeroTables {
     pub cl: Vec<f64>,
     pub cs: Vec<f64>,
     pub cm: Vec<f64>,
+    /// axial drag at zero angle of attack on a fine mach grid (the transonic rise is steep)
+    pub cd0: Vec<f64>,
 }
 
+pub const CD0_MACH_STEP: f64 = 0.005;
 pub const TABLE_MACH_MAX: f64 = 12.0;
 pub const TABLE_ALPHA_MAX_DEG: f64 = 30.0;
 const N_PHI: usize = 24;
@@ -229,7 +232,16 @@ impl AeroTables {
         let n_mach = (TABLE_MACH_MAX / mach_step) as usize + 1;
         let n_alpha = (TABLE_ALPHA_MAX_DEG / alpha_step_deg) as usize + 1;
         let sz = n_mach * n_alpha * N_PHI;
-        let mut t = AeroTables { mach_step, alpha_step_deg, n_mach, n_alpha, n_phi: N_PHI, cd: vec![0.0; sz], cl: vec![0.0; sz], cs: vec![0.0; sz], cm: vec![0.0; sz] };
+        let mut t = AeroTables { mach_step, alpha_step_deg, n_mach, n_alpha, n_phi: N_PHI, cd: vec![0.0; sz], cl: vec![0.0; sz], cs: vec![0.0; sz], cm: vec![0.0; sz], cd0: vec![] };
+        let n0 = (TABLE_MACH_MAX / CD0_MACH_STEP) as usize + 1;
+        for im in 0..n0 {
+            let mach = (im as f64 * CD0_MACH_STEP).max(1e-3);
+            let spd = mach * 300.0;
+            let q_kpa = 0.0005 * spd * spd;
+            let atm = AtmState { p_kpa: 50.0, t: 250.0, rho: 1.0, c: 300.0, mach, q_kpa, pseudo_re_drag_mult: 1.0 };
+            let (f, _) = aero_force(spec, com_l, Quat::IDENTITY, v3(0.0, -spd, 0.0), V3::ZERO, &atm);
+            t.cd0.push(f.y / q_kpa);
+        }
         let rho = 1.0;
         let c = 300.0;
         for im in 0..n_mach {
@@ -282,9 +294,14 @@ impl AeroTables {
         let a1 = at_phi(im + 1, ia) + (at_phi(im + 1, ia + 1) - at_phi(im + 1, ia)) * ta;
         a0 + (a1 - a0) * tm
     }
+    fn cd0(&self, mach: f64) -> f64 {
+        let f = (mach / CD0_MACH_STEP).clamp(0.0, (self.cd0.len() - 1) as f64 - 1e-9);
+        let i = f as usize;
+        self.cd0[i] + (self.cd0[i + 1] - self.cd0[i]) * (f - i as f64)
+    }
     /// Roll-averaged lookups (exact at alpha = 0).
     pub fn cd(&self, mach: f64, alpha_deg: f64) -> f64 {
-        self.interp(&self.cd, mach, alpha_deg, None)
+        self.cd_at(mach, alpha_deg, None)
     }
     pub fn cl(&self, mach: f64, alpha_deg: f64) -> f64 {
         self.interp(&self.cl, mach, alpha_deg, None)
@@ -294,7 +311,10 @@ impl AeroTables {
     }
     /// Lookups at tilt azimuth `phi` (deg); `None` = roll average.
     pub fn cd_at(&self, mach: f64, alpha_deg: f64, phi: Option<f64>) -> f64 {
-        self.interp(&self.cd, mach, alpha_deg, phi)
+        if alpha_deg == 0.0 {
+            return self.cd0(mach);
+        }
+        self.cd0(mach) + self.interp(&self.cd, mach, alpha_deg, phi) - self.interp(&self.cd, mach, 0.0, phi)
     }
     pub fn cl_at(&self, mach: f64, alpha_deg: f64, phi: Option<f64>) -> f64 {
         self.interp(&self.cl, mach, alpha_deg, phi)
