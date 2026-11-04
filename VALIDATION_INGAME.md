@@ -129,8 +129,8 @@ hopper:
 No joint ever broke in the series. That holds although a rigid estimate of the engine joint's
 load passes its breakForce (4400 kN) from ~22 m/s; PhysX distributes the impulse differently.
 The one loss, at 25.8 m/s, was a crashTolerance explosion of the tank 2.2 s after touchdown,
-after a tilted rebound with the legs past full travel. In that regime both games and sims
-diverge within seconds (6 m after 5 s, see below).
+after a tilted rebound with the legs past full travel. In that regime (25.8 and 34.7 m/s) the
+seeded sim replay diverges from the game within seconds: 6.3 and 6.5 m after 5 s.
 
 **The sim now does the same:**
 - hull points carry their part and a primary-collider flag (the Swivel gets its measured Col5
@@ -139,9 +139,13 @@ diverge within seconds (6 m after 5 s, see below).
 - the crash test is the part rigidbody's speed against crashTolerance;
 - the joint-load estimate is off by default (`Params::joint_break`).
 
-Before this change the sim's blind prediction lost the vessel at 18.7 m/s and above (joint
-rule). Now it agrees with the game in 10 of 11 drops. `tests/traces.rs::crash_series_survivals`
-pins the 9 intact drops.
+Before this change, the sim's blind prediction (`examples/crash_predict.rs`, hopper dropped
+from rest) lost the vessel at 18.7 m/s and above, through the joint rule. Now:
+- **blind:** agrees with the game in 9 of 11 drops. It misses the 25.8 m/s tank explosion and
+  crashes at 34.7 m/s after tipping over, where the game ended on its side but intact;
+- **seeded 2 s before touchdown:** agrees in 10 of 11, the table above.
+
+`tests/traces.rs::crash_series_survivals` pins the 9 intact drops.
 
 ## What is still not 1:1, and the bound
 

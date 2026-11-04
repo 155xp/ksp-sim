@@ -122,7 +122,8 @@ b = PointMassBatch(1 << 20, backend="cuda", dtype=np.float32, substeps=10)
 
 * **Per-part joints:** the vessel is one rigid body. Joint flex is bounded (thrust-axis sag
   ≤ 2e-4 rad), and post-impact sliding on hard impacts is 0.2–0.45 m over 5 s.
-* **Crash rule:** validated on vertical pad drops (10 of 11 outcomes, 9.7–39.7 m/s). Tilted and
+* **Crash rule:** validated on vertical pad drops (9.7–39.7 m/s): 10 of 11 outcomes seeded from
+  the game, 9 of 11 blind. Tilted and
   sideways impacts are not yet series-tested.
 * **Off-pad terrain:** ~1 cm residual on the 4 m grid. Tip-over on slopes diverges within ~2 s.
 * **Not modelled:** thermal, lifting/control surfaces, RCS, parachutes, staging, multi-tank flow
