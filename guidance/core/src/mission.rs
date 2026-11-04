@@ -207,7 +207,7 @@ pub const AIM_LONG: bool = false;
 pub const DIVERT: bool = true;
 /// Fraction of the nominal divert reach the landing burn reliably achieves (lift reversal and
 /// attitude lag eat the rest; calibrated on Monte Carlo replays).
-pub const REACH_FRACTION: f64 = 0.1;
+pub const REACH_FRACTION: f64 = 0.2;
 /// Drive the in-air swing to engine-first with the gimbal (tried; costs more than it saves: off).
 pub const GIMBAL_SWING: bool = false;
 /// A 180 degree flip should take about this long (sets the gimbal-assist throttle).
@@ -867,10 +867,13 @@ impl Flight {
         let (r, _, _) = self.landing_state(n);
         let hh = self.hold_height();
         let td = self.touchdown_tilt(n);
-        if r.z <= hh {
-            return td;
-        }
         let lo = td.max(12f64.to_radians());
+        if r.z <= hh {
+            // the footprint limit only matters at contact: taper to it over the final segment,
+            // reaching it one second before touchdown
+            let h1 = self.cfg.v_td.max(0.5);
+            return td + (lo - td) * ((r.z - h1) / (hh - h1).max(0.1)).clamp(0.0, 1.0);
+        }
         lo + (30f64.to_radians() - lo) * ((r.z - hh) / (4.0 * hh)).clamp(0.0, 1.0)
     }
 
@@ -925,7 +928,9 @@ impl Flight {
         let t_td = if r.z > hh { st.t_go } else { r.z.max(0.0) / v_td.max(0.1) };
         let t_sw = if r.z > hh { self.swing_time(n, st.u.clamp(0.05, 1.0)) } else { self.t_settle };
         let t_min = (3.0 * t_sw).max(1.0);
-        let t_h = (t_td - hh / v_td.max(0.1) - self.t_settle).max(t_min);
+        // above the final segment: finish before it, never faster than the attitude allows; in
+        // it: be at rest over the pad one second before touchdown (never later than that)
+        let t_h = if r.z > hh { (t_td - hh / v_td.max(0.1) - self.t_settle).max(t_min) } else { (t_td - 1.0).max(1.5 * self.t_settle).max(2.5) };
         let zem = v3(-6.0 * r.x / (t_h * t_h) - 4.0 * v.x / t_h, -6.0 * r.y / (t_h * t_h) - 4.0 * v.y / t_h, 0.0);
         let lim = self.tilt_limit(n).tan() * az.max(0.0);
         let mut ah = if r.z > hh || (zem.x * zem.x + zem.y * zem.y).sqrt() <= lim { zem } else { v3(-v.x, -v.y, 0.0) * (1.0 / (2.0 * self.t_settle).max(0.8)) };
