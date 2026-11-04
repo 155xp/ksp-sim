@@ -44,6 +44,7 @@ soa! {
     last_vel_provisional: bool, last_vel: [f32; 3], last_vel_idx: u8, drift_frames: u8,
     status: u8, settled_ticks: u16, ticks: u32, impact_speed: f32, toff: f32,
     legs: [crate::wheel::LegState; crate::vessel::MAX_LEGS], ground_shift: V3, ksc_dz: f64, hull_touch: u32,
+    brakes: bool, brake_deflection: f32,
 }
 
 // Raw column pointers are only dereferenced at disjoint indices (one env per task).

@@ -100,6 +100,12 @@ pub struct EnvState {
     /// hull points in ground contact after the last tick (bit k = hull point k): a contact that
     /// was not there before is a PhysX OnCollisionEnter (Part.HandleCollision crash check)
     pub hull_touch: u32,
+    /// Brakes action group (`vessel.ActionGroups[Brakes]` -> `ModuleAeroSurface.deploy`, set by
+    /// `ActionToggleBrakes`). Vessel state, not a FlightCtrlState axis: set it and it stays.
+    pub brakes: bool,
+    /// `ModuleControlSurface.deflection` (deg, float) shared by all of the vessel's aero surfaces;
+    /// moves toward the deploy angle at actuatorSpeed (0.4 deg per tick for the airbrake)
+    pub brake_deflection: f32,
 }
 
 /// Pilot input, as `FlightCtrlState` (mainThrottle, pitch, yaw, roll) in [0,1] / [-1,1].
@@ -452,6 +458,113 @@ pub fn part_aero(spec: &VesselSpec, i: usize, q: Quat, vpart: V3, atm: &atmo::At
     PartAero { drag, dir: vhat, lift, q: qp }
 }
 
+/// `Mathf.MoveTowards` (float).
+#[inline(always)]
+pub fn move_towards(cur: f32, target: f32, max_delta: f32) -> f32 {
+    if (target - cur).abs() <= max_delta {
+        target
+    } else {
+        cur + (target - cur).signum() * max_delta
+    }
+}
+
+/// Flap state for one tick, shared by all aero surfaces (see `EnvState::brake_deflection`).
+#[derive(Clone, Copy, Debug)]
+pub struct AeroSurfaceFlap {
+    /// cos / sin of the deflection
+    pub cos: f64,
+    pub sin: f64,
+    /// `ctrlSurface.localRotation != neutral` (Unity quaternion inequality: dot < 1 - 1e-6, i.e.
+    /// |deflection| > 0.162 deg). Only then is the lift vector turned (`alwaysRecomputeLift` false).
+    pub rotated: bool,
+}
+
+impl AeroSurfaceFlap {
+    pub fn new(deflection_deg: f32) -> Self {
+        let r = (deflection_deg as f64).to_radians();
+        let (sin, cos) = r.sin_cos();
+        AeroSurfaceFlap { cos, sin, rotated: (0.5 * r).cos() < 1.0 - 1e-6 }
+    }
+}
+
+/// Forces of one aero surface (world frame, kN).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceAero {
+    pub drag: V3,
+    pub lift: V3,
+    /// |dot(nVel, lift vector)| of the deflected share (the drag / lift curve argument)
+    pub abs_dot: f64,
+}
+
+/// `ModuleControlSurface.FixedUpdate` force of one surface: with A = ctrlSurfaceArea,
+/// F = (1 - A) * F(neutral lift vector) + A * F(lift vector turned by the deflection), where
+/// (`ModuleLiftingSurface.GetLiftVector` / `GetDragVector`, omnidirectional, Q in Pa)
+///   lift = -liftVector * sign(dot) * lift(|dot|) * liftMach(M) * deflectionLiftCoeff * Q * liftMultiplier
+///   drag = -nVel * drag(|dot|) * dragMach(M) * deflectionLiftCoeff * Q * liftDragMultiplier.
+/// `v_point`: air-relative velocity of the surface's baseTransform; `q_kpa`: the part's dynamic
+/// pressure; `drag_mach` / `lift_mach`: the mach curves at the part's mach number.
+#[inline]
+pub fn aero_surface_force(s: &crate::vessel::AeroSurfaceSpec, q: Quat, v_point: V3, q_kpa: f64, fl: &AeroSurfaceFlap, drag_mach: f64, lift_mach: f64) -> SurfaceAero {
+    let s2 = v_point.norm2();
+    if s2 <= 0.0 || q_kpa <= 0.0 {
+        return SurfaceAero::default();
+    }
+    let nvel = v_point / s2.sqrt();
+    let lv0 = q.rotate(s.lift_vector);
+    let lv = if fl.rotated { q.rotate(s.lift_vector * fl.cos + s.lift_turn * fl.sin) } else { lv0 };
+    let mut out = SurfaceAero::default();
+    let a = s.ctrl_surface_area;
+    let one = |lv: V3, w: f64, out: &mut SurfaceAero| {
+        let dot = nvel.dot(lv);
+        let ad = dot.abs();
+        if s.has_lift {
+            let cl = crate::aero::eval32(s.curves.lift, ad) * lift_mach;
+            let sg = if dot < 0.0 { -1.0 } else { 1.0 };
+            out.lift += lv * (-sg * cl * s.lift_k * q_kpa * w);
+        }
+        if s.internal_drag {
+            let cd = crate::aero::eval32(s.curves.drag, ad) * drag_mach;
+            out.drag += nvel * (-cd * s.drag_k * q_kpa * w);
+        }
+        ad
+    };
+    if a < 1.0 {
+        one(lv0, 1.0 - a, &mut out);
+    }
+    out.abs_dot = one(lv, a, &mut out);
+    out
+}
+
+/// Net force and torque about the CoM (`r_com` from the root origin) of all aero surfaces.
+/// `omega`: body spin when the state is in the inertial frame (air-relative velocities).
+/// Kept out of line so vessels without aero surfaces pay nothing in `tick`.
+#[inline(never)]
+fn aero_surfaces(spec: &VesselSpec, st: &EnvState, v_com: V3, r_com: V3, omega: Option<V3>, atm: &atmo::AtmState) -> (V3, V3) {
+    let (mut force, mut torque) = (V3::ZERO, V3::ZERO);
+    let fl = AeroSurfaceFlap::new(st.brake_deflection);
+    let mut mach_cache = (std::ptr::null::<crate::curve::Key>(), 0.0, 0.0);
+    for k in 0..spec.n_aero_surf as usize {
+        let s = &spec.aero_surf[k];
+        if s.curves.drag_mach.as_ptr() != mach_cache.0 {
+            mach_cache = (s.curves.drag_mach.as_ptr(), crate::aero::eval32(s.curves.drag_mach, atm.mach), crate::aero::eval32(s.curves.lift_mach, atm.mach));
+        }
+        // part.dynamicPressurekPa: rigidbody (part CoM) velocity; nVel: GetPointVelocity(baseTransform.position)
+        let pc = st.q.rotate(spec.part_com[s.part as usize]);
+        let pp = st.q.rotate(s.pos);
+        let (mut vc, mut vp) = (v_com + st.w.cross(pc - r_com), v_com + st.w.cross(pp - r_com));
+        if let Some(om) = omega {
+            vc = vc - om.cross(st.x + pc);
+            vp = vp - om.cross(st.x + pp);
+        }
+        let qp = atm.rho * 0.0005 * vc.norm2();
+        let sa = aero_surface_force(s, st.q, vp, qp, &fl, mach_cache.1, mach_cache.2);
+        force += sa.drag + sa.lift;
+        torque += (st.q.rotate(s.cop) - r_com).cross(sa.drag);
+        torque += (st.q.rotate(s.col) - r_com).cross(sa.lift);
+    }
+    (force, torque)
+}
+
 /// Diagnostic outputs of one tick.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TickInfo {
@@ -569,6 +682,16 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         }
     }
 
+    // 3c. ModuleAeroSurface.CtrlSurfaceUpdate: with ignorePitch / ignoreYaw (and ignoreRoll forced
+    // on) the action is the deploy angle while `deploy`, else 0, clamped to +-1.5 range; the flap
+    // follows with Mathf.MoveTowards at actuatorSpeed * fixedDeltaTime. Runs in vacuum too.
+    if spec.n_aero_surf > 0 {
+        let a = &spec.aero_surf[0];
+        let lim = 1.5 * a.ctrl_surface_range;
+        let tgt = if st.brakes { a.deploy_angle.clamp(-lim, lim) } else { 0.0 };
+        st.brake_deflection = move_towards(st.brake_deflection, tgt as f32, (a.actuator_speed * dt) as f32);
+    }
+
     // 4. gravity + frame accelerations at the CoM (uniform acceleration, no torque)
     let r2 = x_com.norm2();
     let g = x_com * (-b.gm() / (r2 * r2.sqrt()));
@@ -597,12 +720,20 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                     damp_l[a][bb] += ci * mi * spec.part_inertia_root[i][a][bb];
                 }
             }
+            if spec.part_no_cube_drag & (1 << i) != 0 {
+                continue;
+            }
             let pa = part_aero(spec, i, st.q, vpart, &atm, &mt);
             let fd = pa.dir * (-pa.drag);
             force += fd + pa.lift;
             // ApplyAeroDrag at TransformPoint(CoPOffset), ApplyAeroLift at TransformPoint(CoLOffset)
             torque += (st.q.rotate(spec.part_cop[i]) - r_com).cross(fd);
             torque += (st.q.rotate(spec.part_col[i]) - r_com).cross(pa.lift);
+        }
+        if spec.n_aero_surf > 0 {
+            let (f, t) = aero_surfaces(spec, st, v_com, r_com, if rot_frame { None } else { Some(omega) }, &atm);
+            force += f;
+            torque += t;
         }
     }
 
@@ -1127,5 +1258,166 @@ mod tests {
         let xr = st.x + st.q.rotate(com_l);
         let (xf, _) = inertial_to_fixed(KERBIN, t, xi, vi);
         assert!((xr - xf).norm() < 0.05, "{}", (xr - xf).norm());
+    }
+}
+
+#[cfg(test)]
+mod airbrake_tests {
+    use super::*;
+    use crate::aero::{eval32, SPEED_BRAKE_DRAG, SPEED_BRAKE_DRAG_MACH};
+    use crate::parts::{self, AIRBRAKE_NODE};
+    use crate::vessel::Craft;
+
+    /// FL-T800 root with airbrakes 1.45 m above its centre at the given azimuths (VAB rule).
+    fn tank_with_brakes(az: &[f64]) -> Craft {
+        let mut c = Craft { parts: vec![crate::vessel::Placed { def: parts::fuel_tank_t800(), pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![], parent: None }] };
+        for &a in az {
+            c.surface_attach_editor(0, parts::airbrake(), a, 0.625, 1.45, AIRBRAKE_NODE.0, AIRBRAKE_NODE.1);
+        }
+        c
+    }
+
+    /// Net aero-surface force / torque (about the root origin) for root-frame air velocity `v`.
+    fn surf_force(spec: &VesselSpec, v: V3, defl: f32, mach: f64) -> (V3, V3, f64) {
+        let fl = AeroSurfaceFlap::new(defl);
+        let (dm, lm) = (eval32(SPEED_BRAKE_DRAG_MACH, mach), 0.0);
+        let (mut f, mut t, mut ad) = (V3::ZERO, V3::ZERO, 0.0);
+        for k in 0..spec.n_aero_surf as usize {
+            let s = &spec.aero_surf[k];
+            let a = aero_surface_force(s, Quat::IDENTITY, v, 10.0, &fl, dm, lm);
+            f += a.drag + a.lift;
+            t += s.cop.cross(a.drag) + s.col.cross(a.lift);
+            ad = a.abs_dot;
+        }
+        (f, t, ad)
+    }
+
+    #[test]
+    fn placement_and_lift_vector_any_azimuth() {
+        for k in 0..12 {
+            let az = 30.0 * k as f64;
+            let spec = VesselSpec::compile(&tank_with_brakes(&[az]));
+            assert_eq!(spec.n_aero_surf, 1);
+            let s = &spec.aero_surf[0];
+            // Unity azimuth az -> sim outward normal (-cos, 0, sin); part origin 2.5 cm outside the wall
+            let a = az.to_radians();
+            let n = v3(-a.cos(), 0.0, a.sin());
+            assert!((s.lift_vector - n).norm() < 1e-9, "az {az}: {:?}", s.lift_vector);
+            assert!((s.lift_turn - v3(0.0, -1.0, 0.0)).norm() < 1e-9);
+            assert!((s.pos - (v3(0.0, 1.45, 0.0) + n * 0.65)).norm() < 1e-9, "{:?}", s.pos);
+            // no cube drag, no body lift (dragModelType none, ModuleLiftingSurface)
+            assert!(spec.part_faces[1].area.iter().all(|&x| x == 0.0));
+            assert_eq!(spec.part_body_lift[1], 0.0);
+        }
+    }
+
+    #[test]
+    fn axial_drag_matches_module_formula_both_flow_directions() {
+        let spec = VesselSpec::compile(&tank_with_brakes(&[0.0, 90.0, 180.0, 270.0]));
+        let mach = 0.5;
+        for vy in [-150.0, 150.0] {
+            // deployed: |dot| = sin 70
+            let (f, t, ad) = surf_force(&spec, v3(0.0, vy, 0.0), 70.0, mach);
+            let cd = eval32(SPEED_BRAKE_DRAG, (70.0f64).to_radians().sin()) * eval32(SPEED_BRAKE_DRAG_MACH, mach);
+            let want = 4.0 * 10.0 * 0.38 * 0.015 * 1000.0 * cd;
+            assert!((ad - 70f64.to_radians().sin()).abs() < 1e-12);
+            assert!((f.y + vy.signum() * want).abs() < 1e-9 * want, "{f:?} want {want}");
+            assert!(f.x.abs() < 1e-9 && f.z.abs() < 1e-9 && t.norm() < 1e-9, "{f:?} {t:?}");
+            // stowed: the lift vector is the wall normal, |dot| = 0 -> drag(0) = 0.01
+            let (f0, _, ad0) = surf_force(&spec, v3(0.0, vy, 0.0), 0.0, mach);
+            assert!(ad0.abs() < 1e-12);
+            let want0 = want * eval32(SPEED_BRAKE_DRAG, 0.0) / eval32(SPEED_BRAKE_DRAG, 70f64.to_radians().sin());
+            assert!((eval32(SPEED_BRAKE_DRAG, 0.0) - 0.01).abs() < 1e-8 && (f0.y.abs() - want0).abs() < 1e-9 * want, "{f0:?}");
+        }
+        // 45 deg of deflection: |dot| = sin 45 in axial flow
+        let (_, _, ad) = surf_force(&spec, v3(0.0, -100.0, 0.0), 45.0, mach);
+        assert!((ad - 0.5f64.sqrt()).abs() < 1e-7);
+    }
+
+    #[test]
+    fn tail_brakes_weathervane_engine_first() {
+        // falling engine-first with a sideways drift: drag on the brakes (above the CoM) turns the
+        // engine toward the velocity (torque about +z rotates +y toward -x)
+        let spec = VesselSpec::compile(&tank_with_brakes(&[0.0, 90.0, 180.0, 270.0]));
+        let (f, t, _) = surf_force(&spec, v3(10.0, -100.0, 0.0), 70.0, 0.4);
+        assert!(f.x < 0.0 && f.y > 0.0);
+        assert!(t.z > 0.0, "{t:?}");
+    }
+
+    #[test]
+    fn deploys_at_actuator_speed_and_retracts() {
+        let spec = VesselSpec::compile(&tank_with_brakes(&[0.0, 90.0, 180.0, 270.0]));
+        let prm = Params { ground: false, ..Default::default() };
+        let (_, _, u) = pad_enu();
+        let mut st = state_at_pad(&spec, v3(0.0, 0.0, 3000.0), V3::ZERO, attitude(u, v3(0.0, 0.0, 1.0)), V3::ZERO, 0.0);
+        let ctl = Control::default();
+        tick(&spec, &prm, &mut st, &ctl);
+        assert_eq!(st.brake_deflection, 0.0);
+        st.brakes = true;
+        tick(&spec, &prm, &mut st, &ctl);
+        assert!((st.brake_deflection - 0.4).abs() < 1e-6, "{}", st.brake_deflection);
+        for _ in 0..173 {
+            tick(&spec, &prm, &mut st, &ctl);
+        }
+        assert!(st.brake_deflection < 70.0 && st.brake_deflection > 69.0, "{}", st.brake_deflection);
+        tick(&spec, &prm, &mut st, &ctl);
+        assert_eq!(st.brake_deflection, 70.0);
+        st.brakes = false;
+        for _ in 0..175 {
+            tick(&spec, &prm, &mut st, &ctl);
+        }
+        assert_eq!(st.brake_deflection, 0.0);
+    }
+
+    #[test]
+    fn deployed_brakes_slow_the_fall() {
+        let spec = VesselSpec::compile(&tank_with_brakes(&[0.0, 90.0, 180.0, 270.0]));
+        let prm = Params { ground: false, ..Default::default() };
+        let (_, _, u) = pad_enu();
+        let fall = |brakes: bool| {
+            let mut st = state_at_pad(&spec, v3(0.0, 0.0, 6000.0), u * 0.0 + v3(0.0, 0.0, -150.0), attitude(u, v3(0.0, 0.0, 1.0)), V3::ZERO, 0.0);
+            st.brakes = brakes;
+            st.brake_deflection = if brakes { 70.0 } else { 0.0 };
+            let ctl = Control::default();
+            for _ in 0..500 {
+                tick(&spec, &prm, &mut st, &ctl);
+            }
+            st.v.dot(u)
+        };
+        let (open, shut) = (fall(true), fall(false));
+        assert!(open > shut + 20.0, "open {open} shut {shut}");
+    }
+
+    #[test]
+    fn cube_weights_follow_the_flap() {
+        let a = parts::aero_surface("airbrake1").unwrap();
+        let n = parts::airbrake().cube;
+        assert_eq!(a.cube(&n, 0.0), DragCubeBlendRef::blend(&[(1.0, n)]));
+        // at the 70 deg deploy angle: weights 0.5 neutral / 1.0 fullDeflectionPos
+        let c = a.cube(&n, 70.0);
+        let want = DragCubeBlendRef::blend(&[(1.0, n), (2.0, a.cube_pos)]);
+        for i in 0..6 {
+            assert!((c.area[i] - want.area[i]).abs() < 1e-12);
+        }
+        assert_eq!(crate::aero::control_surface_cube_weights(-35.0, 70.0), [1.0, 0.0, 0.5]);
+        // a flap within Unity's quaternion tolerance of neutral counts as neutral
+        assert!(!AeroSurfaceFlap::new(0.1).rotated && AeroSurfaceFlap::new(0.4).rotated);
+    }
+    use crate::aero::DragCube as DragCubeBlendRef;
+
+    #[test]
+    fn trace_geometry_loads_airbrakes() {
+        use crate::trace::{spec_from_geometry, GeomPart};
+        let kv = |p: &[(&str, &str)]| p.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let geom = vec![
+            GeomPart { name: "fuelTank.long".into(), parent: -1, kv: kv(&[("localPos", "0,0,0"), ("localRot", "0,0,0,1")]) },
+            // Unity root-local placement of an azimuth-0 airbrake, with dumped cube faces
+            GeomPart { name: "airbrake1".into(), parent: 0, kv: kv(&[("localPos", "0.65,1.45,0"), ("localRot", "0,0.7071068,0,0.7071068"),
+                ("areaOccluded", "1,1,1,1,1,1"), ("weightedDrag", "0.5,0.5,0.5,0.5,0.5,0.5")]) },
+        ];
+        let s = spec_from_geometry(&geom);
+        assert_eq!(s.n_aero_surf, 1);
+        assert!(s.part_faces[1].area.iter().all(|&x| x == 0.0));
+        assert!((s.aero_surf[0].lift_vector - v3(-1.0, 0.0, 0.0)).norm() < 1e-6, "{:?}", s.aero_surf[0].lift_vector);
     }
 }

@@ -32,6 +32,17 @@ fn main() {
         println!("  no ground       {:.0} ns", run(&spec, &Params { ground: false, ..base }, &st, &ctl, n));
         println!("  sphere terrain  {:.0} ns", run(&spec, &Params { terrain: false, ..base }, &st, &ctl, n));
     }
+    // the same hopper with 4 airbrakes on its tank (ModuleAeroSurface path)
+    let mut c = Craft::hopper();
+    for k in 0..4 {
+        c.surface_attach_editor(1, ksp_core::parts::airbrake(), 90.0 * k as f64, 0.625, 0.5, ksp_core::parts::AIRBRAKE_NODE.0, ksp_core::parts::AIRBRAKE_NODE.1);
+    }
+    let ab = VesselSpec::compile(&c);
+    let mut st = sim::state_at_pad(&ab, v3(10.0, 5.0, 800.0), v3(1.0, 0.0, -40.0), q, V3::ZERO, 0.0);
+    println!("airborne + 4 airbrakes stowed {:.0} ns", run(&ab, &base, &st, &ctl, n));
+    st.brakes = true;
+    st.brake_deflection = 70.0;
+    println!("airborne + 4 airbrakes deployed {:.0} ns", run(&ab, &base, &st, &ctl, n));
     let t = Instant::now();
     let mut acc = 0.0;
     for k in 0..n { acc += spec.mass_props_full(&[180.0 - (k % 100) as f64, 220.0, 10.0, 50.0]).0; }

@@ -13,11 +13,13 @@ use crate::curve::Key;
 use crate::math::{v3, Quat, V3};
 use crate::parts::{PartDef, N_RES, RES_DENSITY};
 
-pub const MAX_PARTS: usize = 16;
+/// 24: the in-game demo stack (10 stack parts, 4 legs, 4 airbrakes) needs 18.
+pub const MAX_PARTS: usize = 24;
 pub const MAX_ENGINES: usize = 4;
 pub const MAX_LEGS: usize = 6;
 pub const MAX_HULL: usize = 24;
 pub const MAX_ISP_KEYS: usize = 8;
+pub const MAX_AERO_SURFACES: usize = 8;
 
 /// A part placed in the craft's root frame (root part origin, root orientation).
 #[derive(Clone, Debug)]
@@ -147,6 +149,53 @@ pub struct EngineSpec {
 
 pub use crate::wheel::LegSpec;
 
+/// One `ModuleAeroSurface` part (airbrake), root frame. All of a vessel's aero surfaces share the
+/// deflection state `EnvState::brake_deflection` (the stock module ignores pitch / yaw / roll, so
+/// every surface follows the Brakes action group with the same actuator rule).
+#[derive(Clone, Copy, Debug)]
+pub struct AeroSurfaceSpec {
+    pub part: u32,
+    /// baseTransform position (= part origin): point velocity, and (CoP/CoLOffset = 0) the force point
+    pub pos: V3,
+    pub cop: V3,
+    pub col: V3,
+    /// neutral lift vector and the direction it turns toward with positive deflection
+    pub lift_vector: V3,
+    pub lift_turn: V3,
+    /// kN per kPa of dynamic pressure per unit curve value: deflectionLiftCoeff * multiplier * 1000
+    pub drag_k: f64,
+    pub lift_k: f64,
+    pub ctrl_surface_area: f64,
+    pub internal_drag: bool,
+    pub has_lift: bool,
+    pub curves: crate::aero::LiftingCurves,
+    pub deploy_angle: f64,
+    pub ctrl_surface_range: f64,
+    pub actuator_speed: f64,
+}
+
+impl Default for AeroSurfaceSpec {
+    fn default() -> Self {
+        AeroSurfaceSpec {
+            part: 0,
+            pos: V3::ZERO,
+            cop: V3::ZERO,
+            col: V3::ZERO,
+            lift_vector: V3::ZERO,
+            lift_turn: V3::ZERO,
+            drag_k: 0.0,
+            lift_k: 0.0,
+            ctrl_surface_area: 0.0,
+            internal_drag: false,
+            has_lift: false,
+            curves: crate::aero::SPEED_BRAKE,
+            deploy_angle: 0.0,
+            ctrl_surface_range: 1.0,
+            actuator_speed: 0.0,
+        }
+    }
+}
+
 /// Flat, `Copy` vessel description (mirrors 1:1 into a CUDA constant buffer).
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -196,6 +245,12 @@ pub struct VesselSpec {
     pub part_break_force: [f64; MAX_PARTS],
     /// part index of each leg
     pub leg_part: [u8; MAX_LEGS],
+    /// ModuleAeroSurface parts (not packed for the CUDA kernel: gpu.rs ignores them)
+    pub n_aero_surf: u32,
+    /// bit i: part i has no cube drag / body lift (dragModelType none), so the tick skips its
+    /// drag-cube evaluation (angular drag still applies)
+    pub part_no_cube_drag: u32,
+    pub aero_surf: [AeroSurfaceSpec; MAX_AERO_SURFACES],
     pub rw_torque: V3,
     pub rw_ec_rate: f64,
     pub rw_response: f64,
@@ -238,6 +293,9 @@ impl VesselSpec {
             part_subtree: [0; MAX_PARTS],
             part_break_force: [f64::INFINITY; MAX_PARTS],
             leg_part: [0; MAX_LEGS],
+            n_aero_surf: 0,
+            part_no_cube_drag: 0,
+            aero_surf: [AeroSurfaceSpec::default(); MAX_AERO_SURFACES],
             rw_torque: V3::ZERO,
             rw_ec_rate: 0.0,
             rw_response: 30.0,
@@ -288,6 +346,33 @@ impl VesselSpec {
                 let q = &c.parts[j];
                 let v_in_neigh = q.rot.conj().rotate(p.rot.rotate(ndir));
                 occlude(&mut f, &d.cube, ndir, facing_area(&q.def.cube, v_in_neigh));
+            }
+            if let Some(a) = crate::parts::aero_surface(d.name) {
+                // the cube weights follow the flap (AeroSurfaceDef::cube), but with dragModelType
+                // none the cube carries no drag; a CUBE-model surface would need per-tick faces
+                assert!(!a.cube_drag, "{}: aero surfaces with cube drag are not modelled", d.name);
+                f = AeroFaces::default();
+                s.part_no_cube_drag |= 1 << i;
+                let k = s.n_aero_surf as usize;
+                assert!(k < MAX_AERO_SURFACES);
+                s.aero_surf[k] = AeroSurfaceSpec {
+                    part: i as u32,
+                    pos: p.pos,
+                    cop: s.part_cop[i],
+                    col: s.part_col[i],
+                    lift_vector: p.rot.rotate(a.lift_vector),
+                    lift_turn: p.rot.rotate(a.lift_turn),
+                    drag_k: a.deflection_lift_coeff * crate::aero::LIFT_DRAG_MULTIPLIER * 1000.0,
+                    lift_k: a.deflection_lift_coeff * crate::aero::LIFT_MULTIPLIER * 1000.0,
+                    ctrl_surface_area: a.ctrl_surface_area,
+                    internal_drag: a.internal_drag,
+                    has_lift: !a.curves.no_lift(),
+                    curves: a.curves,
+                    deploy_angle: a.deploy_angle,
+                    ctrl_surface_range: a.ctrl_surface_range,
+                    actuator_speed: a.actuator_speed,
+                };
+                s.n_aero_surf += 1;
             }
             s.part_faces[i] = f;
             for k in 0..6 {

@@ -335,6 +335,189 @@ pub fn lt2_leg() -> PartDef {
     }
 }
 
+/// LT-2 with the "Retracted" cube (legs stowed in flight); otherwise identical to `lt2_leg`.
+pub fn lt2_leg_retracted() -> PartDef {
+    PartDef {
+        cube: cube("Retracted, 0.4164,0.8241,0.4329, 0.4164,0.8239,0.373, 0.4052,0.5802,1.287, 0.4052,0.5889,1.511, 0.5057,0.679,1.209, 0.5057,0.7584,1.134, 1.043E-07,0.7416,0.4329, 0.4942,1.433,1.152"),
+        ..lt2_leg()
+    }
+}
+
+/// A plain stack part (no modules the sim models besides resources / reaction wheel).
+#[allow(clippy::too_many_arguments)]
+fn stack_part(name: &'static str, mass: f64, angular_drag: f64, crash_tolerance: f64, half_height: f64, cube_line: &str, resources: Vec<(Res, f64, f64)>, reaction_wheel: Option<ReactionWheelDef>) -> PartDef {
+    PartDef {
+        name,
+        mass,
+        com_offset: V3::ZERO,
+        cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
+        angular_drag,
+        crash_tolerance,
+        body_lift: true,
+        cube: cube(cube_line),
+        node_top: Some((v3(0.0, half_height, 0.0), v3(0.0, 1.0, 0.0))),
+        node_bottom: Some((v3(0.0, -half_height, 0.0), v3(0.0, -1.0, 0.0))),
+        resources,
+        engine: None,
+        reaction_wheel,
+        leg: None,
+        hull_radius: None,
+        // not measured for these parts; the value the game set on every stack joint dumped so far
+        joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
+    }
+}
+
+// Cubes of the next four parts: PartDatabase.cfg of the demo install (~/ksp-demo/KSP, the copy
+// that flew ingame/telemetry); the fidelity install's regenerated cubes differ by < 1 % on a few
+// faces (renderer-dependent cube generation).
+
+/// RC-001S probe core. Command/probeStackSmall/probeStackSmall.cfg (rescaleFactor 1).
+pub fn probe_stack_small() -> PartDef {
+    stack_part(
+        "probeStackSmall", 0.1, 2.0, 9.0, 0.1,
+        "Default, 0.2933,0.7008,0.758, 0.2933,0.7009,0.758, 1.398,0.9704,0.1499, 1.398,0.9739,0.1499, 0.2852,0.6613,0.7765, 0.2852,0.6622,0.7765, 0,0,0, 1.334,0.22,1.359",
+        vec![(Res::ElectricCharge, 15.0, 15.0)],
+        Some(ReactionWheelDef { pitch_torque: 0.5, yaw_torque: 0.5, roll_torque: 0.5, ec_rate: 0.03, torque_response_speed: 30.0 }),
+    )
+}
+
+/// Z-1k battery bank. Electrical/z-1kBattery/z-1kBattery.cfg.
+pub fn battery_bank() -> PartDef {
+    stack_part(
+        "batteryBank", 0.05, 1.0, 8.0, 0.1108553,
+        "Default, 0.2808,0.7809,0.7051, 0.2808,0.7809,0.7051, 1.213,0.9695,0.14, 1.213,0.9695,0.14, 0.2808,0.7805,0.7051, 0.2808,0.7805,0.7051, 0,0,0, 1.25,0.22,1.25",
+        vec![(Res::ElectricCharge, 1000.0, 1000.0)],
+        None,
+    )
+}
+
+/// Small inline reaction wheel. Command/inlineAdvancedStabilizer/inlineAdvancedStabilizer.cfg.
+pub fn adv_sas_module() -> PartDef {
+    stack_part(
+        "advSasModule", 0.1, 2.0, 9.0, 0.1990267,
+        "Default, 0.5389,0.7798,0.7665, 0.5389,0.7799,0.7665, 1.281,0.988,0.1504, 1.281,0.988,0.1504, 0.5389,0.7789,0.7665, 0.5389,0.7788,0.7665, 0,7.451E-09,-8.882E-16, 1.351,0.3993,1.351",
+        vec![],
+        Some(ReactionWheelDef { pitch_torque: 15.0, yaw_torque: 15.0, roll_torque: 15.0, ec_rate: 0.45, torque_response_speed: 30.0 }),
+    )
+}
+
+/// TD-12 decoupler (inert: ModuleDecouple is not simulated). Coupling/Decoupler_1.cfg
+/// (explosiveNodeID = top: after staging it stays on the part below it).
+pub fn decoupler_td12() -> PartDef {
+    stack_part(
+        "Decoupler_1", 0.04, 2.0, 6.0, 0.05,
+        "Default, 0.1988,0.7448,0.8757, 0.1988,0.7448,0.8757, 1.217,0.9952,0.1299, 1.217,0.9952,0.1299, 0.1988,0.7442,0.8871, 0.1988,0.7442,0.8871, 0,0,0, 1.25,0.16,1.25",
+        vec![],
+        None,
+    )
+}
+
+/// `ModuleAeroSurface` (: ModuleControlSurface : ModuleLiftingSurface) as the game sets it up.
+///
+/// Frames are the sim's part frame (Unity part frame mirrored in x). Two decomp facts decide the
+/// geometry:
+/// - `ModuleControlSurface` re-declares `transformName` (`public new string transformName`), and
+///   `BaseFieldList.ReflectedData` resolves every KSPField by name on the most derived type, so
+///   the cfg's `transformName = Flap` only reaches the control-surface field (`ctrlSurface`,
+///   the visual flap). `ModuleLiftingSurface.transformName` stays empty, so `baseTransform` is the
+///   part transform: `liftVector` = part +Z (transformDir Z), the outward surface normal for a
+///   surface attach with node_attach direction +Z.
+/// - `ModuleControlSurface.FixedUpdate` turns that vector by `airflowIncidence =
+///   AngleAxis(deflection, baseTransform.rotation * right)` whenever the flap's localRotation
+///   differs from neutral (Unity `!=`, i.e. dot < 1 - 1e-6): lift vector = Z cos d - Y sin d.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AeroSurfaceDef {
+    /// ModuleLiftingSurface.deflectionLiftCoeff (scales lift and drag curves)
+    pub deflection_lift_coeff: f64,
+    /// ModuleControlSurface.ctrlSurfaceRange (deg)
+    pub ctrl_surface_range: f64,
+    /// share of the force computed with the deflected lift vector (the rest uses the neutral one)
+    pub ctrl_surface_area: f64,
+    /// deg/s, Mathf.MoveTowards (useExponentialSpeed = false)
+    pub actuator_speed: f64,
+    /// ModuleAeroSurface.aeroDeployAngle (NaN in the cfg -> ctrlSurfaceRange at OnStart)
+    pub deploy_angle: f64,
+    /// ModuleLiftingSurface.useInternalDragModel
+    pub internal_drag: bool,
+    /// whether the part's drag-cube drag applies (dragModelType CUBE / DEFAULT); `none` makes
+    /// FlightIntegrator.CalculateDragValue return 0 (the cubes then only feed thermal / area)
+    pub cube_drag: bool,
+    /// Physics.cfg LIFTING_SURFACE curves (`liftingSurfaceCurve`)
+    pub curves: crate::aero::LiftingCurves,
+    /// neutral lift vector and the direction it turns toward with positive deflection (part frame)
+    pub lift_vector: V3,
+    pub lift_turn: V3,
+    /// IMultipleDragCube positions: "neutral" (= PartDef.cube), "fullDeflectionPos" / "Neg"
+    /// (flap at +-1.5 * ctrlSurfaceRange, `AssumeDragCubePosition`)
+    pub cube_pos: DragCube,
+    pub cube_neg: DragCube,
+}
+
+impl AeroSurfaceDef {
+    /// The blended cube for a flap deflection (deg), as `SetCubeWeight` + `SetDragWeights_List`.
+    pub fn cube(&self, neutral: &DragCube, deflection: f64) -> DragCube {
+        let w = crate::aero::control_surface_cube_weights(deflection, self.ctrl_surface_range);
+        DragCube::blend(&[(w[0], *neutral), (w[1], self.cube_pos), (w[2], self.cube_neg)])
+    }
+}
+
+/// A.I.R.B.R.A.K.E.S. Aero/airbrake/Airbrake.cfg (mass 0.05, crashTolerance 8, dragModelType
+/// none, angularDrag 2, CoM/CoP/CoL offsets commented out = 0; node_attach 0,0,-0.025 dir +Z);
+/// neutral cube PartDatabase.cfg (airbrake1). ModuleLiftingSurface.disableBodyLift defaults to
+/// true (Part.hasLiftModule), so no body lift. The module data is `aero_surface("airbrake1")`.
+pub fn airbrake() -> PartDef {
+    PartDef {
+        name: "airbrake1",
+        mass: 0.05,
+        com_offset: V3::ZERO,
+        cop_offset: V3::ZERO,
+        col_offset: V3::ZERO,
+        angular_drag: 2.0,
+        crash_tolerance: 8.0,
+        body_lift: false,
+        cube: cube("neutral, 0.3767,0.5233,0.525, 0.3767,0.527,0.525, 0.1066,0.3505,0.9374, 0.1066,0.4695,1.975, 1.453,0.9112,0.2996, 1.453,0.9087,0.2613, -5.96E-08,-0.6985,0.01376, 0.8542,2.343,0.2244"),
+        node_top: None,
+        node_bottom: None,
+        resources: vec![],
+        engine: None,
+        reaction_wheel: None,
+        leg: None,
+        hull_radius: None,
+        // not measured (surface-attach joint)
+        joint_break_force: 4400.0,
+        hull_crash: true,
+        crash_sensors: vec![],
+    }
+}
+
+/// Airbrake srfAttach node (Airbrake.cfg node_attach, rescaleFactor 1): position, direction.
+pub const AIRBRAKE_NODE: (V3, V3) = (v3(0.0, 0.0, -0.025), v3(0.0, 0.0, 1.0));
+
+/// `ModuleAeroSurface` data by part name (kept out of `PartDef` so struct-literal users of
+/// `PartDef` are unaffected). Airbrake.cfg: dragCoeff 0.6 is not read by the module.
+pub fn aero_surface(name: &str) -> Option<AeroSurfaceDef> {
+    match name {
+        "airbrake1" => Some(AeroSurfaceDef {
+            deflection_lift_coeff: 0.38,
+            ctrl_surface_range: 70.0,
+            ctrl_surface_area: 1.0,
+            actuator_speed: 20.0,
+            deploy_angle: 70.0,
+            internal_drag: true,
+            cube_drag: false,
+            curves: crate::aero::SPEED_BRAKE,
+            lift_vector: v3(0.0, 0.0, 1.0),
+            lift_turn: v3(0.0, -1.0, 0.0),
+            cube_pos: cube("fullDeflectionPos, 0.4561,0.5978,0.525, 0.4561,0.5972,0.525, 1.338,0.8739,0.8227, 1.338,0.8747,1.589, 0.554,0.4864,2.113, 0.554,0.6162,2.122, 1.192E-07,-0.08187,0.9338, 0.8542,1.608,2.064"),
+            cube_neg: cube("fullDeflectionNeg, 0.4447,0.5905,0.525, 0.4447,0.5898,0.525, 1.326,0.8441,0.8366, 1.326,0.8877,1.637, 0.5599,0.5775,2.105, 0.5599,0.5102,1.999, -8.941E-08,-0.07445,-0.8939, 0.8542,1.623,2.046"),
+        }),
+        _ => None,
+    }
+}
+
 pub fn by_name(name: &str) -> Option<PartDef> {
     Some(match name {
         "mk1pod_v2" => mk1pod_v2(),
@@ -344,6 +527,11 @@ pub fn by_name(name: &str) -> Option<PartDef> {
         "liquidEngine3_v2" => terrier(),
         "landingLeg1" => lt1_leg(),
         "landingLeg1-2" => lt2_leg(),
+        "probeStackSmall" => probe_stack_small(),
+        "batteryBank" => battery_bank(),
+        "advSasModule" => adv_sas_module(),
+        "Decoupler_1" => decoupler_td12(),
+        "airbrake1" => airbrake(),
         _ => return None,
     })
 }
@@ -382,8 +570,66 @@ mod tests {
             ("Engine/liquidEngineLV-909_v2/liquidEngineLV-909_v2.cfg", terrier(), "Clean"),
             ("Utility/landingLegLT-1/landingLegLT-1.cfg", lt1_leg(), "Deployed"),
             ("Utility/landingLegLT-2/landingLegLT-2.cfg", lt2_leg(), "Deployed"),
+            ("Utility/landingLegLT-2/landingLegLT-2.cfg", lt2_leg_retracted(), "Retracted"),
+            ("Aero/airbrake/Airbrake.cfg", airbrake(), "neutral"),
         ];
+        check_parts(&parts, &pdb, &cases);
+        // ModuleAeroSurface fields and the deflected cubes
+        let p = part_node(&parts.join("Aero/airbrake/Airbrake.cfg"));
+        let a = aero_surface("airbrake1").unwrap();
+        assert_eq!(p.get("dragModelType"), Some("none"));
+        assert!(!a.cube_drag);
+        assert_eq!(p.get_f64("angularDrag"), Some(airbrake().angular_drag));
+        let m = p.nodes_named("MODULE").find(|n| n.get("name") == Some("ModuleAeroSurface")).unwrap();
+        assert_eq!(m.get_f64("deflectionLiftCoeff"), Some(a.deflection_lift_coeff));
+        assert_eq!(m.get_f64("ctrlSurfaceRange"), Some(a.ctrl_surface_range));
+        assert_eq!(m.get_f64("ctrlSurfaceArea"), Some(a.ctrl_surface_area));
+        assert_eq!(m.get_f64("actuatorSpeed"), Some(a.actuator_speed));
+        assert_eq!(m.get("liftingSurfaceCurve"), Some("SpeedBrake"));
+        assert_eq!(m.get("useInternalDragModel"), Some("True"));
+        assert_eq!(m.get("ignorePitch"), Some("true"));
+        assert_eq!(m.get("ignoreYaw"), Some("true"));
+        // no aeroDeployAngle / transformDir / omnidirectional / perpendicularOnly overrides
+        for k in ["aeroDeployAngle", "transformDir", "transformSign", "omnidirectional", "perpendicularOnly", "useExponentialSpeed", "displaceVelocity", "brakeDeployInvert"] {
+            assert!(m.get(k).is_none(), "{k}");
+        }
+        let v = vec3(p.get("node_attach").unwrap());
+        assert_eq!((v3(v[0], v[1], v[2]), v3(v[3], v[4], v[5])), AIRBRAKE_NODE);
+        let dc = pdb.nodes_named("PART").find(|n| n.get("url").is_some_and(|u| u.ends_with("/airbrake1"))).and_then(|n| n.node("DRAG_CUBE").cloned()).unwrap();
+        let cubes: Vec<(String, DragCube)> = dc.get_all("cube").filter_map(DragCube::parse).collect();
+        let find = |n: &str| cubes.iter().find(|(c, _)| c == n).unwrap().1.mirrored_x();
+        assert_eq!(find("fullDeflectionPos"), a.cube_pos);
+        assert_eq!(find("fullDeflectionNeg"), a.cube_neg);
+    }
+
+    /// The parts of the in-game demo booster that only the demo install's PartDatabase was used
+    /// for (~/ksp-demo/KSP or $KSP_DEMO; skipped when absent).
+    #[test]
+    fn matches_demo_install() {
+        let k = std::env::var("KSP_DEMO").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::Path::new(&std::env::var("HOME").unwrap_or_default()).join("ksp-demo/KSP"));
+        if !k.join("PartDatabase.cfg").exists() {
+            return;
+        }
+        let parts = k.join("GameData/Squad/Parts");
+        let pdb = cfg::parse(&std::fs::read_to_string(k.join("PartDatabase.cfg")).unwrap());
+        let cases = [
+            ("Command/probeStackSmall/probeStackSmall.cfg", probe_stack_small(), "Default"),
+            ("Electrical/z-1kBattery/z-1kBattery.cfg", battery_bank(), "Default"),
+            ("Command/inlineAdvancedStabilizer/inlineAdvancedStabilizer.cfg", adv_sas_module(), "Default"),
+            ("Coupling/Decoupler_1.cfg", decoupler_td12(), "Default"),
+            ("Aero/airbrake/Airbrake.cfg", airbrake(), "neutral"),
+        ];
+        check_parts(&parts, &pdb, &cases);
+        for (rel, def, _) in &cases {
+            let p = part_node(&parts.join(rel));
+            assert_eq!(p.get_f64("angularDrag"), Some(def.angular_drag), "{}", def.name);
+            assert_eq!(p.get_f64("rescaleFactor").unwrap_or(1.25), 1.0, "{}", def.name);
+        }
+    }
+
+    fn check_parts(parts: &std::path::Path, pdb: &cfg::Node, cases: &[(&str, PartDef, &str)]) {
         for (rel, def, cube_name) in cases {
+            let (def, cube_name) = (def.clone(), *cube_name);
             let p = part_node(&parts.join(rel));
             assert_eq!(p.get("name"), Some(def.name));
             assert_eq!(p.get_f64("mass"), Some(def.mass), "{}", def.name);

@@ -70,6 +70,55 @@ pub const BODY_LIFT_MACH: &[Key] = &[
     k(5.0, 0.0625, 0.0, 0.0), k(25.0, 0.05, 0.0, 0.0),
 ];
 
+/// Physics.cfg LIFTING_SURFACE "SpeedBrake" (A.I.R.B.R.A.K.E.S): lift (x = sin AoA), all zero.
+pub const SPEED_BRAKE_LIFT: &[Key] = &[k(0.0, 0.0, 0.0, 0.0)];
+/// SpeedBrake liftMach.
+pub const SPEED_BRAKE_LIFT_MACH: &[Key] = &[k(0.0, 0.0, 0.0, 0.0)];
+/// SpeedBrake drag (x = |dot(flow, liftVector)|).
+pub const SPEED_BRAKE_DRAG: &[Key] = &[
+    k(0.0, 0.01, 0.0, 0.0), k(0.3420201, 0.06, 0.1750731, 0.1750731), k(0.5, 0.24, 2.60928, 2.60928),
+    k(0.7071068, 1.7, 3.349777, 3.349777), k(1.0, 2.4, 1.387938, 0.0),
+];
+/// SpeedBrake dragMach.
+pub const SPEED_BRAKE_DRAG_MACH: &[Key] = &[
+    k(0.0, 0.35, 0.0, -0.8463008), k(0.15, 0.125, 0.0, 0.0), k(0.9, 0.275, 0.541598, 0.541598), k(1.1, 0.75, 0.0, 0.0),
+    k(1.4, 0.4, -0.3626955, -0.3626955), k(1.6, 0.35, -0.1545923, -0.1545923), k(2.0, 0.3, -0.09013031, -0.09013031),
+    k(5.0, 0.22, 0.0, 0.0), k(25.0, 0.3, 0.0006807274, 0.0),
+];
+
+/// One Physics.cfg LIFTING_SURFACE curve set (`PhysicsGlobals.LiftingSurfaceCurve`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LiftingCurves {
+    pub lift: &'static [Key],
+    pub lift_mach: &'static [Key],
+    pub drag: &'static [Key],
+    pub drag_mach: &'static [Key],
+}
+
+pub const SPEED_BRAKE: LiftingCurves = LiftingCurves { lift: SPEED_BRAKE_LIFT, lift_mach: SPEED_BRAKE_LIFT_MACH, drag: SPEED_BRAKE_DRAG, drag_mach: SPEED_BRAKE_DRAG_MACH };
+
+impl LiftingCurves {
+    /// Whether the lift curve is identically zero (SpeedBrake): the lift term can be skipped.
+    pub fn no_lift(&self) -> bool {
+        self.lift.iter().all(|k| k.v == 0.0 && k.tin == 0.0 && k.tout == 0.0) || self.lift_mach.iter().all(|k| k.v == 0.0 && k.tin == 0.0 && k.tout == 0.0)
+    }
+}
+
+/// FloatCurve.Evaluate (float in, float out).
+#[inline(always)]
+pub fn eval32(keys: &[Key], x: f64) -> f64 {
+    fe(keys, x)
+}
+
+/// `ModuleControlSurface.FixedUpdate` drag-cube weights after the forces (`SetCubeWeight`):
+/// neutral = maxAuthority/100 - |d/range|, fullDeflectionPos = clamp01(d/range),
+/// fullDeflectionNeg = clamp01(-d/range) (maxAuthority = 150). The weights are not normalised
+/// here; `DragCube::blend` normalises them like `SetDragWeights_List`.
+pub fn control_surface_cube_weights(deflection: f64, range: f64) -> [f64; 3] {
+    let r = deflection / range;
+    [1.5 - r.abs(), r.clamp(0.0, 1.0), (-r).clamp(0.0, 1.0)]
+}
+
 /// BodyLift lift curve evaluated in f32 (FloatCurve float semantics), unrolled over its 6 keys.
 #[inline]
 pub fn body_lift_curve32(x: f32) -> f32 {
@@ -364,6 +413,10 @@ mod tests {
         let bl = ls.nodes_named("LIFTING_SURFACE").find(|n| n.get("name") == Some("BodyLift")).unwrap();
         assert_eq!(crate::cfg::curve(bl.node("lift").unwrap()).keys.as_slice(), BODY_LIFT_CURVE);
         assert_eq!(crate::cfg::curve(bl.node("liftMach").unwrap()).keys.as_slice(), BODY_LIFT_MACH);
+        let sb = ls.nodes_named("LIFTING_SURFACE").find(|n| n.get("name") == Some("SpeedBrake")).unwrap();
+        for (node, keys) in [("lift", SPEED_BRAKE_LIFT), ("liftMach", SPEED_BRAKE_LIFT_MACH), ("drag", SPEED_BRAKE_DRAG), ("dragMach", SPEED_BRAKE_DRAG_MACH)] {
+            assert_eq!(crate::cfg::curve(sb.node(node).unwrap()).keys.as_slice(), keys, "SpeedBrake {node}");
+        }
         for (k, v) in [("dragMultiplier", DRAG_MULTIPLIER), ("dragCubeMultiplier", DRAG_CUBE_MULTIPLIER),
                        ("angularDragMultiplier", ANGULAR_DRAG_MULTIPLIER), ("liftMultiplier", LIFT_MULTIPLIER),
                        ("liftDragMultiplier", LIFT_DRAG_MULTIPLIER), ("bodyLiftMultiplier", BODY_LIFT_MULTIPLIER)] {

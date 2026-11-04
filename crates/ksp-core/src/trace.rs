@@ -177,6 +177,8 @@ fn mat_of(q: Quat) -> [[f64; 3]; 3] {
 
 /// A VesselSpec from the game's geometry dump: stock part definitions supply the module data
 /// (engine curves, wheel torque, resources), the dump supplies every geometric / inertial value.
+/// Airbrakes (`airbrake1`) load like any catalog part; their flap deflection is state
+/// (`EnvState::brakes` / `brake_deflection`), which `state_at` leaves stowed: set it from the trace.
 pub fn spec_from_geometry(geom: &[GeomPart]) -> VesselSpec {
     spec_from_geometry_wheels(geom, None)
 }
@@ -227,7 +229,9 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
             }
             s.part_inertia_root[i] = t;
         }
-        if let (Some(ao), Some(wd)) = (g.vec("areaOccluded"), g.vec("weightedDrag")) {
+        // dragModelType none (airbrake): the game evaluates the cube but applies no cube drag
+        let cube_drag = parts::aero_surface(&g.name.replace('.', "_")).is_none_or(|a| a.cube_drag);
+        if let (true, Some(ao), Some(wd)) = (cube_drag, g.vec("areaOccluded"), g.vec("weightedDrag")) {
             let mut f = AeroFaces { area: [ao[0], ao[1], ao[2], ao[3], ao[4], ao[5]], drag: [wd[0], wd[1], wd[2], wd[3], wd[4], wd[5]] };
             f.area.swap(0, 1);
             f.drag.swap(0, 1);
