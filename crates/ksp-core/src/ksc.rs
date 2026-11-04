@@ -226,6 +226,19 @@ mod tests {
         }
     }
 
+    /// Cross-check vs the launch-pad coordinate the kOS community uses
+    /// (`LATLNG(-0.0972092543643722, -74.557706433623)`, a vessel root sampled on the pad):
+    /// agreement to well under a metre.
+    #[test]
+    fn matches_kos_pad_coordinate() {
+        let (lat, lon) = (-0.0972092543643722, -74.557706433623);
+        let d_lat_m = (lat - KSC_PAD_LAT_DEG).to_radians() * KERBIN_RADIUS;
+        let d_lon_m = (lon - KSC_PAD_LON_DEG).to_radians() * KERBIN_RADIUS;
+        let d = d_lat_m.hypot(d_lon_m);
+        println!("kOS pad offset: {d_lat_m:.3} m N, {d_lon_m:.3} m E, |d| = {d:.3} m");
+        assert!(d < 0.5, "{d}");
+    }
+
     #[test]
     fn kerbin_rotation() {
         // sidereal from the solar day exactly as CelestialBody.Start does it
