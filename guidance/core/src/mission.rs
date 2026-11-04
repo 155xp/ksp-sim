@@ -216,6 +216,7 @@ pub struct Flight {
     entry_dir: V3,
     contact_t: f64,
     hold_h: f64,
+    t_settle: f64,
     last_thrust: f64,
     prop_at_ign: f64,
     pub gplan: Option<gfold::Plan>,
@@ -267,6 +268,7 @@ impl Flight {
             entry_dir: pad.u,
             contact_t: 0.0,
             hold_h: 2.0,
+            t_settle: 1.0,
             last_thrust: 0.0,
             prop_at_ign: 0.0,
             gplan: None,
@@ -614,7 +616,21 @@ impl Flight {
         let ixx = n.inertia_l[0][0].min(n.inertia_l[2][2]).max(1e-9);
         let alpha = capacity(&e.b, v3(1.0, 0.0, 0.0)).min(capacity(&e.b, v3(0.0, 0.0, 1.0))) / ixx;
         let t_settle = 2.0 * (2.0 * 10f64.to_radians() / alpha.max(1e-6)).sqrt();
+        self.t_settle = t_settle.min(6.0);
         self.hold_h = self.cfg.v_td.max(0.5) * (1.5 + t_settle).clamp(1.5, 8.0);
+    }
+
+    /// Tilt limit from vertical during the landing burn: 30 deg high up, tapering to 12 deg at the
+    /// hold height, then the leg-footprint limit in the final segment.
+    fn tilt_limit(&self, n: &Nav) -> f64 {
+        let (r, _, _) = self.landing_state(n);
+        let hh = self.hold_height();
+        let td = self.touchdown_tilt(n);
+        if r.z <= hh {
+            return td;
+        }
+        let lo = td.max(12f64.to_radians());
+        lo + (30f64.to_radians() - lo) * ((r.z - hh) / (4.0 * hh)).clamp(0.0, 1.0)
     }
 
     /// Max tilt at touchdown from the leg footprint: 30 % of the tip-over angle.
@@ -659,14 +675,17 @@ impl Flight {
             // final metres: hold the touchdown rate (drag is negligible here)
             -grav.z + 3.0 * (-v_td - v.z)
         };
-        // horizontal: finish the divert TAIL_S before touchdown so the last metres (where the tilt
-        // limit tapers) are flown upright over the pad
-        let t_go = if r.z > hh { (st.t_go - TAIL_S).max(0.0) } else { 0.0 };
-        let mut ah = if t_go > 1.0 {
-            v3(-6.0 * r.x / (t_go * t_go) - 4.0 * v.x / t_go, -6.0 * r.y / (t_go * t_go) - 4.0 * v.y / t_go, 0.0)
-        } else {
-            v3(-v.x / 0.7 - 0.3 * r.x, -v.y / 0.7 - 0.3 * r.y, 0.0)
-        };
+        // horizontal: ZEM/ZEV to rest over the pad, timed to finish before the hold segment (by the
+        // hold time plus two attitude swings of this craft); once that time is used up, aim for
+        // rest one second before touchdown, and if the tilt limit can't deliver that, kill the
+        // drift first (touchdown speed matters more than the last metre of position)
+        let t_td = if r.z > hh { st.t_go } else { r.z.max(0.0) / v_td.max(0.1) };
+        let tail = TAIL_S.max(hh / v_td.max(0.1) + 2.0 * self.t_settle);
+        let early = t_td - tail > 1.0;
+        let t_h = if early { t_td - tail } else { (t_td - 1.0).max(0.5) };
+        let zem = v3(-6.0 * r.x / (t_h * t_h) - 4.0 * v.x / t_h, -6.0 * r.y / (t_h * t_h) - 4.0 * v.y / t_h, 0.0);
+        let lim = self.tilt_limit(n).tan() * az.max(0.0);
+        let mut ah = if early || (zem.x * zem.x + zem.y * zem.y).sqrt() <= lim { zem } else { v3(-v.x, -v.y, 0.0) * (1.0 / 0.8) };
         ah.x -= grav.x;
         ah.y -= grav.y;
         v3(ah.x, ah.y, az)
@@ -721,11 +740,7 @@ impl Flight {
             }
         }
         let mut dir = if t_use.norm2() > 0.0 { w * alpha.cos() + t_use * alpha.sin() } else { w };
-        // tilt limit from vertical: 30 deg high up, tapering to the leg-footprint limit
-        let (r, _, _) = self.landing_state(n);
-        let hh = self.hold_height();
-        let td = self.touchdown_tilt(n);
-        let max_tilt = td + (30f64.to_radians() - td) * ((r.z - hh) / (4.0 * hh)).clamp(0.0, 1.0);
+        let max_tilt = self.tilt_limit(n);
         let c = dir.dot(up);
         if c < max_tilt.cos() {
             let h = (dir - up * c).normalized();
