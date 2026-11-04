@@ -15,7 +15,7 @@
 //!
 //! Unity evaluates in f32; we evaluate in f64 (relative difference ~1e-7).
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 #[repr(C)]
 pub struct Key {
     pub t: f64,

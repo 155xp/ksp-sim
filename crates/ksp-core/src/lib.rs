@@ -1,7 +1,13 @@
 //! ksp-core: headless re-implementation of stock KSP 1.12.5 flight physics.
-pub mod body;
+pub mod aero;
+pub mod atmo;
 pub mod bodies_data;
+pub mod body;
+pub mod cfg;
 pub mod curve;
+pub mod engine;
 pub mod ksc;
 pub mod math;
 pub mod orbit;
+pub mod parts;
+pub mod vessel;
