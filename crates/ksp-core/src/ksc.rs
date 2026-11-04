@@ -109,6 +109,11 @@ pub const KSC_PAD_LON_DEG: f64 = -74.5576753437982;
 pub const KSC_PAD_SPAWN_ALT: f64 = 72.5667520618299;
 /// Altitude ASL of the pad deck collider surface directly under the spawn point (resting contact).
 pub const KSC_PAD_DECK_ALT: f64 = 72.44806638965383;
+/// Pad deck surface altitude ASL under the spawn point *as the running game sees it*: Physics.Raycast
+/// against the scenery layer from the SimHarness ground survey (collider "Launch Pad", KSP 1.12.5).
+/// 2.8 cm below the asset-derived `KSC_PAD_DECK_ALT`; the deck rises 0.76 mm/m toward the east and
+/// is ~30 m across, on a platform 4.75 m above the surrounding ground (67.68 m).
+pub const KSC_PAD_DECK_ALT_GAME: f64 = 72.4203;
 /// Body-fixed Cartesian position of the pad deck centre (m), sim BodyFrame.
 pub const KSC_PAD_DECK_BODY_FIXED: V3 = v3(159779.99675417927, -578408.3843433404, -1018.0800317083273);
 

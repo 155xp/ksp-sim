@@ -8,3 +8,6 @@ __pycache__/
 *.so
 .venv/
 *.egg-info/
+/data/
+harness/plugin/bin/
+harness/plugin/obj/

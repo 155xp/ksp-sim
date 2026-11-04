@@ -70,6 +70,28 @@ pub const BODY_LIFT_MACH: &[Key] = &[
     k(5.0, 0.0625, 0.0, 0.0), k(25.0, 0.05, 0.0, 0.0),
 ];
 
+/// BodyLift lift curve evaluated in f32 (FloatCurve float semantics), unrolled over its 6 keys.
+#[inline]
+pub fn body_lift_curve32(x: f32) -> f32 {
+    let k = BODY_LIFT_CURVE;
+    if x <= k[0].t as f32 {
+        return k[0].v as f32;
+    }
+    let n = k.len();
+    if x >= k[n - 1].t as f32 {
+        return k[n - 1].v as f32;
+    }
+    let mut i = 0;
+    while i < n - 2 && x >= k[i + 1].t as f32 {
+        i += 1;
+    }
+    let (a, b) = (&k[i], &k[i + 1]);
+    let dx = (b.t - a.t) as f32;
+    let t = (x - a.t as f32) / dx;
+    let (t2, t3) = (t * t, t * t * t);
+    (2.0 * t3 - 3.0 * t2 + 1.0) * a.v as f32 + (t3 - 2.0 * t2 + t) * a.tout as f32 * dx + (-2.0 * t3 + 3.0 * t2) * b.v as f32 + (t3 - t2) * b.tin as f32 * dx
+}
+
 #[inline(always)]
 fn fe(keys: &[Key], x: f64) -> f64 {
     eval(keys, x as f32 as f64) as f32 as f64
@@ -106,6 +128,17 @@ impl DragCube {
         c.center = v3(f[18], f[19], f[20]);
         c.size = v3(f[21], f[22], f[23]);
         Some((tok[0].to_string(), c))
+    }
+
+    /// The same cube expressed in the sim's right-handed part frame, which is Unity's left-handed
+    /// part frame mirrored in x (x -> -x): the +X and -X faces swap and the centre x flips.
+    pub fn mirrored_x(&self) -> DragCube {
+        let mut c = *self;
+        c.area.swap(0, 1);
+        c.drag.swap(0, 1);
+        c.depth.swap(0, 1);
+        c.center.x = -c.center.x;
+        c
     }
 
     /// `SetDragWeights_List`: weight-normalised blend of several cubes.

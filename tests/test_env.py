@@ -43,18 +43,21 @@ def test_constants_and_pad():
     assert abs(p[0] - 101.325) < 1e-4 and p[1] == 0.0
 
 
-def attitude_hold(obs, kp=4.0, kd=6.0):
+def attitude_hold(obs, kp=4.0, kd=6.0, target=None):
     """Reaction-wheel/gimbal command (pitch, roll, yaw) that rotates the vessel up axis to vertical.
 
-    Vessel-local axes in ENU: y = up (obs 6:9), z = forward (obs 9:12), x = y cross z. The wheel
-    torque is rotation * -(pitch, roll, yaw) * 5 kN m (ModuleReactionWheel), so command = -tau / 5.
+    Vessel-local axes in ENU: y = up (obs 6:9), z = forward (obs 9:12), x = y cross z (the sim's
+    right-handed root frame). As in the game, the wheel torque in that frame is
+    (-pitch, +roll, +yaw) * 5 kN m (ModuleReactionWheel, Unity frame mirrored in x).
     """
     up, fw = obs[:, 6:9], obs[:, 9:12]
     x = np.cross(up, fw)
-    err = np.cross(up, np.array([0.0, 0.0, 1.0]))  # rotation axis taking up -> vertical
+    if target is None:
+        target = np.broadcast_to(np.array([0.0, 0.0, 1.0]), up.shape)
+    err = np.cross(up, target)  # rotation axis taking up -> target
     w = obs[:, 12:15]
     tau = kp * np.stack([(err * x).sum(1), (err * up).sum(1), (err * fw).sum(1)], 1) - kd * w
-    return np.clip(-tau / 5.0, -1, 1)
+    return np.clip(tau * np.array([-1.0, 1.0, 1.0]) / 5.0, -1, 1)
 
 
 def test_hover_controller_lands():
@@ -71,7 +74,13 @@ def test_hover_controller_lands():
         thr = np.clip(acc * m / 168.0, 0.0, 1.0)
         a = np.zeros((n, 4), np.float32)
         a[:, 0] = thr
-        cmd = attitude_hold(obs)
+        # horizontal guidance: tilt the thrust axis against horizontal offset / velocity (<= 10 deg)
+        hcmd = -0.02 * obs[:, 0:2] - 0.12 * obs[:, 3:5]
+        hn = np.linalg.norm(hcmd, axis=1, keepdims=True)
+        hcmd = np.where(hn > 0.176, hcmd / np.maximum(hn, 1e-9) * 0.176, hcmd)
+        tgt = np.c_[hcmd, np.ones(n)]
+        tgt /= np.linalg.norm(tgt, axis=1, keepdims=True)
+        cmd = attitude_hold(obs, target=tgt)
         a[:, 1], a[:, 3], a[:, 2] = cmd[:, 0], cmd[:, 1], cmd[:, 2]
         a[obs[:, 19] > 0] = 0.0  # engine and controls off once a leg touches
         obs, rew, term, trunc, info = env.step(a)

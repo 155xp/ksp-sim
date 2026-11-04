@@ -15,12 +15,19 @@ drag cubes) is transcribed with tests that re-read the local install; see DESIGN
 crates/ksp-core     Rust physics (no Python): curves, bodies, atmosphere, aero, engines, parts,
                     vessel compiler, per-env tick (sim.rs), batched SoA stepper (batch.rs), orbits
 crates/ksp-py       PyO3 bindings (maturin): VecEnv with in-place numpy buffers, GIL released
-python/ksp_sim      gym-style LanderVecEnv, CUDA point-mass path (cuda.py)
-tools/              asset extractors (UnityPy) and code generator for bodies_data.rs
-tests/              Python tests (API, determinism, scripted landing, GPU parity)
+python/ksp_sim      gym-style LanderVecEnv; CUDA full 6-DOF tick (cuda_full.py: cuda_tick32.cu mixed
+                    precision, cuda_tick.cu f64 reference); CUDA point-mass path (cuda.py)
+harness/            in-game ground truth: SimHarness KSP plugin (per-tick CSV logger, geometry dumps,
+                    ground survey), kOS test scripts, craft generator, launch scripts
+assets/             ksc_terrain.bin (in-game raycast survey of the pad / KSC / terrain)
+tools/              asset extractors (UnityPy), body code generator, terrain packer
+tests/              Python tests (API, determinism, scripted landing, GPU vs CPU vs game traces)
 bench/              CPU (Python API) and GPU benchmarks
-DESIGN.md           what KSP does each tick, frames, sources, approximations
-VALIDATION.md       generated validation report
+data/               (git-ignored) in-game traces used by the regression tests
+DESIGN.md           what KSP does each tick, frames, scenery placement, sources, precision
+VALIDATION.md       generated validation report (constants, atmosphere, engines, dV, drag)
+VALIDATION_INGAME.md  tick-by-tick comparison with the running game, what is not 1:1 and its bound
+BENCHMARKS.md       speed history (every change gated by the trace regression tests)
 ```
 
 ## Build / use
@@ -28,8 +35,8 @@ VALIDATION.md       generated validation report
 ```bash
 uv venv .venv && uv pip install -p .venv maturin numpy pytest cupy-cuda12x   # cupy optional
 .venv/bin/maturin develop --release
-cargo test -p ksp-core           # 35 Rust tests (some re-read the KSP install if present)
-.venv/bin/python -m pytest tests # 6 Python tests
+cargo test --release -p ksp-core # 37 unit tests + 9 in-game trace regressions (skipped without data/)
+.venv/bin/python -m pytest tests # 28 Python tests (GPU ones skipped without cupy)
 ```
 
 ```python
@@ -44,6 +51,18 @@ Same-step auto-reset; `info["outcome"]` (landed / crashed / out_of_bounds / time
 is in `python/ksp_sim/env.py`. The default craft is a "hopper": Mk1 pod + FL-T400 + LV-T45 Swivel
 + 3× LT-2 legs (4.89 t wet, 1650 m/s vac dV, sea-level TWR 3.5).
 
+Full 6-DOF tick on the GPU (same physics as the CPU tick; state stays on the device):
+```python
+from ksp_sim.cuda_full import GpuTick
+g = GpuTick.from_reset(1 << 20, seed=0)        # precision="mixed" (default) or "f64"
+g.step(actions, substeps=5)                     # (n, 4) float32 on host or device
+states = g.states()                             # (n, STATE_FIELDS) float64, ksp_core::gpu layout
+```
+
+For a lander meant to fly in the real game, randomize the scenery placement the way KSP moves it
+(see DESIGN.md "Scenery placement"):
+`LanderVecEnv(..., ground_shift_max=0.022, ksc_dz_max=0.04)`.
+
 GPU point-mass path:
 ```python
 from ksp_sim.cuda import PointMassBatch
@@ -57,7 +76,8 @@ b = PointMassBatch(1 << 20, backend="cuda", dtype=np.float32, substeps=10)
 | KSC pad latitude | −0.09720779075939527° | PQSCity.Orientate → LaunchPad prefab → `CelestialBody.GetLatLonAlt` (sharedassets9) |
 | KSC pad longitude | −74.5576753437982° | same; 0.33 m from the kOS community pad `LATLNG(-0.0972092543643722, -74.557706433623)` |
 | pad spawn-point altitude | 72.5667520618299 m ASL | `LaunchPad_spawn` transform (Level 3 pad) |
-| pad deck surface altitude | 72.44806638965383 m ASL | MeshCollider ray cast; matches stock training saves' `alt − hgt` to < 1 cm |
+| pad deck surface altitude (asset) | 72.44806638965383 m ASL | MeshCollider ray cast on the prefab |
+| pad deck surface altitude (in game, under the spawn point) | 72.4203 m ASL | SimHarness Physics.Raycast survey; 2.8 cm below the asset value. Moves ±2.2 cm with floating-origin re-rounding, plus a per-session KSC offset (DESIGN.md "Scenery placement") |
 | Kerbin equatorial radius | 600 000 m | `CelestialBody.Radius` |
 | Kerbin GM | 3.5316 × 10¹² m³/s² | `GeeASL · 9.80665 · R²` (`CelestialBody.Awake`) |
 | Kerbin sidereal rotation period | 21 549.425183 s | from the 21 600 s solar day (`CelestialBody.Start`) |
@@ -66,63 +86,89 @@ b = PointMassBatch(1 << 20, backend="cuda", dtype=np.float32, substeps=10)
 
 ## Implemented
 
-* Unity `AnimationCurve` / `FloatCurve` evaluation (Hermite, clamped, `AddKey` smooth tangents).
-* All 17 stock bodies' serialized data; GM / SOI / sidereal day derivations; Kepler orbits
-  (state ↔ elements, elliptic + hyperbolic propagation).
-* Atmosphere: pressure / temperature curves, latitude + time-of-day temperature offset
-  (`GetAtmoThermalStats`), density, speed of sound, mach, q, pseudo-Reynolds.
-* Drag cubes (PartDatabase), stack-node occlusion, mach-dependent tip/surface/tail curves, Cd curve
-  and power, pseudo-Reynolds multiplier, body lift, angular drag.
-* Engines: Isp vs part static pressure, fuel flow, propellant ratios, deprivation / flameout,
-  throttle response; gimbal; reaction wheel with ElectricCharge.
-* Kerbin-fixed rotating frame with Coriolis + centrifugal, inertial frame above 100 km with KSP's
-  switch, vacuum orbit drift compensation, PhysX-style semi-implicit Euler at 0.02 s.
-* Rigid-body 6-DOF vessel from placed parts (mass / CoM / inertia updated as fuel burns), leg
-  suspension contact, hull crash detection with part crash tolerances.
-* Batched SoA stepper (rayon), pad-landing task (reset distribution, shaped reward, outcomes),
-  PyO3 `VecEnv`, gym-style `LanderVecEnv`; CUDA point-mass + atmosphere kernel (float32/64).
+* **Curves and bodies:**
+  - Unity `AnimationCurve` / `FloatCurve` evaluation (Hermite, clamped, `AddKey` smooth tangents
+    recomputed from the final neighbours).
+  - All 17 stock bodies' serialized data, GM / SOI / sidereal day derivations, Kepler orbits.
+* **Atmosphere:** pressure and temperature curves, latitude + time-of-day temperature offset,
+  density, speed of sound, mach, q, pseudo-Reynolds, velocity smoothing.
+* **Aero:** drag cubes (mirrored into the sim frame), stack-node occlusion, mach-dependent
+  tip/surface/tail curves, Cd curve and power, body lift at the CoL, per-part angular drag.
+* **Engines:**
+  - Isp vs part static pressure, fuel flow, deprivation / flameout, throttle response.
+  - Gimbal about the measured pivot; reaction wheel with ElectricCharge.
+* **Frames and integration:**
+  - Kerbin-fixed rotating frame with Coriolis and centrifugal terms, inertial above 100 km,
+    vacuum orbit drift compensation.
+  - PhysX-style semi-implicit Euler at 0.02 s, composite gyroscopics and per-part damping.
+* **Landing legs, exactly as the game:** `SuspensionLoadBalancer` → `ModuleWheelSuspension`
+  (BoostCurve, autoBoost, tweakables, rounding, hysteresis) → VPP wheel collider (one-tick lag,
+  target clamp and slew) → PhysX suspension law, plus the locked-wheel tire friction.
+* **Ground:**
+  - The in-game raycast survey around the pad (0.2 m / 4 m grids), with per-collider friction.
+  - Scenery placement (floating-origin re-rounding and the per-session KSC offset) as state, with
+    optional reset jitter.
+  - Hull-point impulse contacts. Crashes follow the game's collision rule (primary colliders
+    only, collision-enter speed against crashTolerance), checked by an in-game drop series.
+* **Craft geometry** taken from the game's geometry dump: parts, colliders, inertia, wheel
+  colliders, thrust and gimbal transforms.
+* **Batching and APIs:**
+  - Batched SoA stepper (rayon), pad-landing task, PyO3 `VecEnv`, gym-style `LanderVecEnv`.
+  - Full-tick CUDA kernels (mixed precision and f64), CUDA point-mass path.
+* **In-game harness:** a kOS + plugin logger in a copy of the install, 10 reference traces, and
+  regression tests on CPU and GPU.
 
 ## Not implemented / left
 
-* Per-part joints (vessel is one rigid body), collider-accurate inertia, exact thrust-transform
-  and gimbal-transform geometry from the `.mu` models.
-* Exact `ModuleWheelSuspension` dynamics (boost, auto-spring, sprung-mass distribution), PQS
-  terrain and KSC building colliders (ground is the pad-deck sphere).
-* Thermal model, lifting surfaces / control surfaces in flight, RCS, parachutes, staging,
-  multiple-tank flow priority, SOI transitions inside the physics tick, `.craft` file loading.
-* Validation against recorded in-game trajectories (needs running KSP with a logger mod; the game
-  was only read, never launched).
-* CUDA port of the full 6-DOF kernel (the CPU kernel is already written gather → pure tick →
-  scatter with `repr(C)` POD state, so it ports 1:1).
+* **Per-part joints:** the vessel is one rigid body. Joint flex is bounded (thrust-axis sag
+  ≤ 2e-4 rad). Hard impacts drift 1–11 cm over 5 s, up to 0.2 m when one leg lands 3 ticks
+  ahead of the others.
+* **Suspension timing in multi-leg impacts:** the rate application and the grounded-leg count
+  are each one tick off from the game in transitions (VALIDATION_INGAME.md).
+* **Crash rule:** validated on vertical pad drops (9.7–39.7 m/s): 10 of 11 outcomes seeded from
+  the game, 9 of 11 blind. Tilted and
+  sideways impacts are not yet series-tested.
+* **Off-pad terrain:** ~1 cm residual on the 4 m grid. Tip-over on slopes diverges within ~2 s.
+* **Not modelled:** thermal, lifting/control surfaces, RCS, parachutes, staging, multi-tank flow
+  priority, `.craft` loading.
+* **GPU kernels:** no vacuum orbit-drift compensation (rotating frame below 100 km only).
+* **GPU env wrapper:** observation / reward / auto-reset on the device. The kernel steps physics
+  only; `LanderVecEnv` runs on the CPU.
 
-## Validation (full report: VALIDATION.md)
+## Validation
 
-* Constants vs published values: radius, GM, SOI, sidereal day, orbital period, surface speed,
-  escape velocity, Mun GM/SOI all agree to ≤ 1.5e-5 relative (limited by the published digits).
-* Pad: 0.33 m from the kOS pad coordinate; deck height within 1 cm of the stock training saves.
-* Atmosphere at sea level: P = 101.325 kPa (−3e-6), ρ = 1.22498 kg/m³ vs 1.225 (1.9e-5), c = 340.30 m/s.
-* Engines: Swivel 215 / 167.969 kN and Terrier 60 / 14.783 kN vac / ASL match the part stats to ≤ 3e-5.
-* Mk1 + FL-T400 + LV-909: 2755 m/s vac dV (community / in-game ≈ 2750).
-* Dynamics: rotating-frame drop agrees with an inertial integration to 5 cm over 20 s; vacuum
-  Kepler pinning holds to < 0.5 m per 100 s; GPU f32 within 3.4 cm of the f64 reference after
-  20 s; point-mass model within 0.085 m/s of the 6-DOF core while the vessel stays axial.
-* Not validated against the running game: drag magnitudes in flight (the per-face math follows
-  the decompiled code exactly), leg touchdown dynamics.
+* **Against the running game** (VALIDATION_INGAME.md, 10 traces):
+  - One-step CoM acceleration error, airborne: median 7e-5 m/s² (ascent to 80 km) to 6e-3 m/s²
+    (gimbal-heavy hops).
+  - 1-s open-loop windows: ≤ 1.2 cm and ≤ 0.12° in the ascent / hover / suicide burns;
+    ≤ 2.7 cm / 0.84° in gimbal-heavy pad landings and hops.
+  - Touchdown happens on the same tick as in the game in every trace, with 0.2–7.7 mm position
+    error at touchdown.
+  - Soft pad landings stay within 4 cm 5 s later. Hard impacts drift 1–11 cm, and 0.2 m in the
+    asymmetric 9.2 m/s drop.
+  - Per-part drag and lift match the game to 4–5 significant figures; the PhysX wheel
+    spring/damper/target match exactly.
+* **Constants** (VALIDATION.md): radius, GM, SOI, sidereal day etc. to ≤ 1.5e-5 relative.
+* **Pad:**
+  - The game spawn point is within 2.7 cm horizontally of the derived pad.
+  - The deck is at 72.4203 m by in-game raycast, ±2.2 cm from origin-shift re-rounding plus a
+    per-session offset (0 in 7 of 9 sessions).
+* **GPU:**
+  - The mixed kernel's error against the game equals the CPU's to 3 significant figures on every
+    trace.
+  - Against the CPU: ≤ 1.3e-6 m after 5 ticks, ≤ 6e-6 m after 50.
+  - The f64 kernel matches the CPU to 1e-9 m.
 
-## Performance (i7-13700KF, 24 threads, RTX 4060 Ti; other services running, ±20%)
+## Performance (i7-13700KF, RTX 4060 Ti; full history and method in BENCHMARKS.md)
 
-Full 6-DOF hopper, CPU:
+Full 6-DOF hopper, CPU (rayon, measured on a quiet machine before the scenery change):
+1.17 M / 8.4 M / 14.1 M env-ticks/s at 1 / 1 024 / 65 536 envs; single-thread tick 609 ns
+airborne, 842 ns landed.
 
-| envs | physics ticks/s (Rust) | env-steps/s via Python, 1 tick/step | via Python, 5 ticks/step |
-|---|---|---|---|
-| 1 | 1.0–1.2 M | 0.68 M | 0.23 M (1.17 M ticks/s) |
-| 1 024 | 6.8–8.1 M | 6.5–7.7 M | 2.0–2.1 M (10–10.7 M ticks/s) |
-| 65 536 | 11.6–14.2 M | 13.0–13.4 M | 3.1–3.3 M (15.7–16.6 M ticks/s) |
+Full 6-DOF hopper, GPU (`bench/bench_cuda_full.py`, 5 ticks per launch):
 
-Point-mass + full atmosphere, GPU (`bench/bench_cuda.py`):
-
-| dtype | envs | ticks/launch | physics ticks/s |
-|---|---|---|---|
-| float32 | 65 536 | 1 / 10 | 4.7 G / 8.0 G |
-| float32 | 4 194 304 | 1 / 10 | 3.0 G / 9.5 G |
-| float64 | 4 194 304 | 1 / 10 | 0.39 G / 0.42 G |
+| kernel | reset | 65 536 envs | 1 048 576 envs | vs CPU at 65 536 |
+|---|---|---|---|---|
+| mixed (default) | default (600–1500 m) | 258 M ticks/s | 279 M ticks/s | 18–20x |
+| mixed | near ground (2–30 m) | 130 M ticks/s | 142 M ticks/s | 9–10x |
+| f64 reference | default | 37 M ticks/s | 41 M ticks/s | 2.9x |
