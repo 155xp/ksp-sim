@@ -18,10 +18,9 @@
 //! 8. rotating <-> inertial frame switch at inverseRotThresholdAltitude
 //!    (OrbitPhysicsManager.checkReferenceFrame / setRotatingFrame).
 
-use crate::aero::{mach_terms, BODY_LIFT_CURVE, BODY_LIFT_MULTIPLIER, DRAG_CUBE_MULTIPLIER, DRAG_MULTIPLIER, FACE_DIRS};
+use crate::aero::{mach_terms, BODY_LIFT_MULTIPLIER, DRAG_CUBE_MULTIPLIER, DRAG_MULTIPLIER};
 use crate::atmo::{self, KPA_TO_ATM};
 use crate::body::{RawBody, KERBIN};
-use crate::curve::eval;
 use crate::engine;
 use crate::ksc;
 use crate::math::{v3, Quat, V3};
@@ -352,34 +351,39 @@ pub fn part_aero(spec: &VesselSpec, i: usize, q: Quat, vpart: V3, atm: &atmo::At
     let vhat = vpart / s2.sqrt();
     let prot = q * spec.part_rot[i];
     let d = prot.conj().rotate(vhat);
+    // DragCubeList.AddSurfaceDragDirection runs in float; the face normals are the +-axes, so each
+    // face dot product is a signed component of the local flow direction
     let f = &spec.part_faces[i];
-    let (mut area_drag, mut area, mut lift_l) = (0.0, 0.0, V3::ZERO);
+    let lcd = &spec.part_face_ln_cd32[i];
+    let comp = [d.x as f32, d.y as f32, d.z as f32];
+    let (tip, surf, tail, mult, cdp) = (mt.tip as f32, mt.surf as f32, mt.tail as f32, mt.mult as f32, mt.cd_pow as f32);
+    let body_lift = spec.part_body_lift[i] != 0.0;
+    let (mut area_drag, mut area) = (0.0f32, 0.0f32);
+    let mut lift_l = [0.0f32; 3];
     for j in 0..6 {
-        let dot = d.dot(FACE_DIRS[j]);
+        let dot = if j & 1 == 0 { comp[j >> 1] } else { -comp[j >> 1] };
         let dot01 = (dot + 1.0) * 0.5;
-        let sc = if dot01 <= 0.5 {
-            (mt.tail + (mt.surf - mt.tail) * (2.0 * dot01)) * mt.mult
-        } else {
-            (mt.surf + (mt.tip - mt.surf) * (2.0 * dot01 - 1.0)) * mt.mult
-        };
-        let a = f.area[j] * sc;
+        let sc = if dot01 <= 0.5 { (tail + (surf - tail) * (2.0 * dot01)) * mult } else { (surf + (tip - surf) * (2.0 * dot01 - 1.0)) * mult };
+        let fa = f.area[j] as f32;
+        let a = fa * sc;
         area += a;
-        let lcd = spec.part_face_ln_cd[i][j];
-        let cd = if lcd.is_nan() { f.drag[j] } else { (mt.cd_pow * lcd).exp() };
+        let l = lcd[j];
+        let cd = if l.is_nan() { f.drag[j] as f32 } else { (cdp * l).exp() };
         area_drag += a * cd;
-        if dot > 0.0 && spec.part_body_lift[i] != 0.0 {
-            let l = dot * f.area[j] * f.drag[j] * (eval(BODY_LIFT_CURVE, dot as f32 as f64) as f32 as f64);
-            lift_l -= FACE_DIRS[j] * l;
+        if dot > 0.0 && body_lift {
+            let lv = dot * fa * f.drag[j] as f32 * crate::aero::body_lift_curve32(dot);
+            let sgn = if j & 1 == 0 { -1.0 } else { 1.0 };
+            lift_l[j >> 1] += sgn * lv;
         }
     }
     if area <= 0.0 {
         area_drag = 0.0;
     }
-    let drag = qp * area_drag * DRAG_CUBE_MULTIPLIER * atm.pseudo_re_drag_mult * DRAG_MULTIPLIER;
+    let drag = qp * area_drag as f64 * DRAG_CUBE_MULTIPLIER * atm.pseudo_re_drag_mult * DRAG_MULTIPLIER;
     let mut lift = V3::ZERO;
-    if spec.part_body_lift[i] != 0.0 {
+    if body_lift {
         let bl = qp * spec.part_body_lift[i] * BODY_LIFT_MULTIPLIER * mt.body_lift_mach;
-        let l = prot.rotate(lift_l * bl);
+        let l = prot.rotate(v3(lift_l[0] as f64, lift_l[1] as f64, lift_l[2] as f64) * bl);
         lift = l - vhat * l.dot(vhat);
     }
     PartAero { drag, dir: vhat, lift, q: qp }
@@ -408,7 +412,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     }
 
     // 1. mass stats / CoM
-    let (m, com_l, i_l, i_own_l) = spec.mass_props_full(&st.res);
+    let (m, com_l, i_l, i_own_l, m_parts) = spec.mass_props_parts(&st.res);
     info.mass = m;
     let r_com = st.q.rotate(com_l);
     let x_com = st.x + r_com;
@@ -524,7 +528,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
             let qp = atm.rho * 0.0005 * s2; // part dynamic pressure, kPa
             // FlightIntegrator.UpdateAerodynamics: rb.angularDrag = angularDrag * q_atm * multiplier
             let ci = (spec.part_angular_drag[i] * (qp * KPA_TO_ATM) * crate::aero::ANGULAR_DRAG_MULTIPLIER).max(0.0);
-            let mi = spec.part_mass(i, &st.res);
+            let mi = m_parts[i];
             for a in 0..3 {
                 for bb in 0..3 {
                     damp_l[a][bb] += ci * mi * spec.part_inertia_root[i][a][bb];
@@ -539,26 +543,10 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         }
     }
 
-    // world-frame inertia tensor and its inverse
-    let iw_inv = {
-        let ex = st.q.rotate(v3(1.0, 0.0, 0.0));
-        let ey = st.q.rotate(v3(0.0, 1.0, 0.0));
-        let ez = st.q.rotate(v3(0.0, 0.0, 1.0));
-        let rm = [[ex.x, ey.x, ez.x], [ex.y, ey.y, ez.y], [ex.z, ey.z, ez.z]];
-        let mut iw = [[0.0; 3]; 3];
-        for a in 0..3 {
-            for c in 0..3 {
-                let mut s = 0.0;
-                for k in 0..3 {
-                    for l in 0..3 {
-                        s += rm[a][k] * i_l[k][l] * rm[c][l];
-                    }
-                }
-                iw[a][c] = s;
-            }
-        }
-        inv3(&iw)
-    };
+    // inverse inertia applied in the root frame (cheaper than building world-frame tensors)
+    let q0 = st.q;
+    let il_inv = inv3(&i_l);
+    let iinv_w = |v: V3| q0.rotate(mat_vec(&il_inv, q0.conj().rotate(v)));
 
 
     // 6. ground contact (body-fixed ground; only meaningful in the rotating frame)
@@ -681,37 +669,18 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     // rotation: rigid composite of PhysX bodies. PhysX integrates each body without its own
     // gyroscopic term, but the joints enforce the parallel-axis inertia, whose gyroscopic torque
     // -w x (I_orb w) does act; then per-body angular damping, clamp, orientation.
-    let to_world = |ml: &[[f64; 3]; 3]| {
-        let ex = st.q.rotate(v3(1.0, 0.0, 0.0));
-        let ey = st.q.rotate(v3(0.0, 1.0, 0.0));
-        let ez = st.q.rotate(v3(0.0, 0.0, 1.0));
-        let rm = [[ex.x, ey.x, ez.x], [ex.y, ey.y, ez.y], [ex.z, ey.z, ez.z]];
-        let mut o = [[0.0; 3]; 3];
-        for a in 0..3 {
-            for c in 0..3 {
-                let mut s = 0.0;
-                for k in 0..3 {
-                    for l in 0..3 {
-                        s += rm[a][k] * ml[k][l] * rm[c][l];
-                    }
-                }
-                o[a][c] = s;
-            }
-        }
-        o
-    };
     let mut i_orb_l = i_l;
     for a in 0..3 {
         for c in 0..3 {
             i_orb_l[a][c] -= i_own_l[a][c];
         }
     }
-    let i_orb_w = to_world(&i_orb_l);
-    let gyro = st.w.cross(mat_vec(&i_orb_w, st.w));
-    let alpha = mat_vec(&iw_inv, torque - gyro);
-    let mut w = st.w + alpha * dt;
-    let damp_w = to_world(&damp_l);
-    w = w - mat_vec(&iw_inv, mat_vec(&damp_w, w)) * dt;
+    let wl = q0.conj().rotate(st.w);
+    let gyro_l = wl.cross(mat_vec(&i_orb_l, wl));
+    let alpha_l = mat_vec(&il_inv, q0.conj().rotate(torque) - gyro_l);
+    let mut wl2 = wl + alpha_l * dt;
+    wl2 = wl2 - mat_vec(&il_inv, mat_vec(&damp_l, wl2)) * dt;
+    let mut w = q0.rotate(wl2);
     // PhysX contact solve (velocity level, sequential impulses). Measured in game (SimHarness
     // collider dump): part colliders and KSC colliders carry no PhysicMaterial (Unity default:
     // friction 0.6, bounciness 0, Average), PQS terrain "Ground" (0.9, combine Maximum);
@@ -737,27 +706,27 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 let vp = v + w.cross(c.r);
                 let vn = vp.dot(c.n);
                 let rn = c.r.cross(c.n);
-                let k_n = 1.0 / m + rn.dot(mat_vec(&iw_inv, rn));
+                let k_n = 1.0 / m + rn.dot(iinv_w(rn));
                 let dl = (target - vn) / k_n;
                 let new = (lam_n[ci] + dl).max(0.0);
                 let dj = new - lam_n[ci];
                 lam_n[ci] = new;
                 v += c.n * (dj / m);
-                w += mat_vec(&iw_inv, rn * dj);
+                w += iinv_w(rn * dj);
                 let vp = v + w.cross(c.r);
                 let vt = vp - c.n * vp.dot(c.n);
                 let vtn = vt.norm();
                 if vtn > 1e-12 {
                     let tdir = vt / vtn;
                     let rt = c.r.cross(tdir);
-                    let k_t = 1.0 / m + rt.dot(mat_vec(&iw_inv, rt));
+                    let k_t = 1.0 / m + rt.dot(iinv_w(rt));
                     let want = lam_t[ci] - tdir * (vtn / k_t);
                     let cap = c.mu * lam_n[ci];
                     let lt = if want.norm() > cap { want.normalized() * cap } else { want };
                     let dj = lt - lam_t[ci];
                     lam_t[ci] = lt;
                     v += dj / m;
-                    w += mat_vec(&iw_inv, c.r.cross(dj));
+                    w += iinv_w(c.r.cross(dj));
                 }
             }
         }

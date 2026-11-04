@@ -166,6 +166,8 @@ pub struct VesselSpec {
     pub part_faces: [AeroFaces; MAX_PARTS],
     /// ln(DRAG_CD(face Cd)) (mach-independent; Cd' = exp(pow(M) * this)); NaN marks Cd >= 1
     pub part_face_ln_cd: [[f64; 6]; MAX_PARTS],
+    /// the same in f32 (the game evaluates the cube faces in float)
+    pub part_face_ln_cd32: [[f32; 6]; MAX_PARTS],
     pub part_body_lift: [f64; MAX_PARTS],
     pub part_angular_drag: [f64; MAX_PARTS],
     pub res_cap_total: [f64; N_RES],
@@ -202,6 +204,7 @@ impl VesselSpec {
             part_inertia_per_t: [V3::ZERO; MAX_PARTS],
             part_faces: [AeroFaces::default(); MAX_PARTS],
             part_face_ln_cd: [[f64::NAN; 6]; MAX_PARTS],
+            part_face_ln_cd32: [[f32::NAN; 6]; MAX_PARTS],
             part_inertia_root: [[[0.0; 3]; 3]; MAX_PARTS],
             part_body_lift: [0.0; MAX_PARTS],
             part_angular_drag: [0.0; MAX_PARTS],
@@ -339,7 +342,16 @@ impl VesselSpec {
             s.bottom_y = s.bottom_y.min(s.hull[k].y);
         }
         s.update_bounds();
+        s.update_ln_cd32();
         s
+    }
+
+    pub fn update_ln_cd32(&mut self) {
+        for i in 0..MAX_PARTS {
+            for k in 0..6 {
+                self.part_face_ln_cd32[i][k] = self.part_face_ln_cd[i][k] as f32;
+            }
+        }
     }
 
     /// Recompute `bound_radius` (call after editing hull / leg geometry).
@@ -367,14 +379,20 @@ impl VesselSpec {
     /// resource fill fraction per resource.
     #[inline]
     pub fn mass_props(&self, res: &[f64; N_RES]) -> (f64, V3, [[f64; 3]; 3]) {
-        let (m, c, it, _) = self.mass_props_full(res);
+        let (m, c, it, _, _) = self.mass_props_parts(res);
         (m, c, it)
+    }
+
+    pub fn mass_props_full(&self, res: &[f64; N_RES]) -> (f64, V3, [[f64; 3]; 3], [[f64; 3]; 3]) {
+        let (m, c, it, own, _) = self.mass_props_parts(res);
+        (m, c, it, own)
     }
 
     /// Mass, CoM, total inertia about the CoM, and the sum of the parts' *own* inertias (all
     /// root frame). total - own = the parallel-axis ("orbital") part, which in the game comes from
     /// the joints between part rigidbodies.
-    pub fn mass_props_full(&self, res: &[f64; N_RES]) -> (f64, V3, [[f64; 3]; 3], [[f64; 3]; 3]) {
+    #[allow(clippy::type_complexity)]
+    pub fn mass_props_parts(&self, res: &[f64; N_RES]) -> (f64, V3, [[f64; 3]; 3], [[f64; 3]; 3], [f64; MAX_PARTS]) {
         let mut m_parts = [0.0; MAX_PARTS];
         let mut m = 0.0;
         let mut mc = V3::ZERO;
@@ -406,7 +424,7 @@ impl VesselSpec {
                 }
             }
         }
-        (m, com, it, own)
+        (m, com, it, own, m_parts)
     }
 
     /// Part mass for a resource state (dry + its share of each resource).

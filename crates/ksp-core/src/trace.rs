@@ -282,6 +282,7 @@ pub fn spec_from_geometry_wheels(geom: &[GeomPart], wheels: Option<&[GeomPart]>)
         }
     }
     s.update_bounds();
+    s.update_ln_cd32();
     s
 }
 
