@@ -12,4 +12,6 @@ pub mod math;
 pub mod orbit;
 pub mod parts;
 pub mod sim;
+pub mod trace;
 pub mod vessel;
+pub mod wheel;

@@ -16,7 +16,7 @@ use crate::parts::{PartDef, N_RES, RES_DENSITY};
 pub const MAX_PARTS: usize = 16;
 pub const MAX_ENGINES: usize = 4;
 pub const MAX_LEGS: usize = 6;
-pub const MAX_HULL: usize = 12;
+pub const MAX_HULL: usize = 16;
 pub const MAX_ISP_KEYS: usize = 8;
 
 /// A part placed in the craft's root frame (root part origin, root orientation).
@@ -60,17 +60,64 @@ impl Craft {
         self.parts.len() - 1
     }
 
-    /// The default lander: Mk1 pod / FL-T400 / LV-T45 Swivel, three LT-2 legs on the tank.
+    /// Surface-attach with the VAB rule (EditorLogic.cs:10794), evaluated in Unity's left-handed
+    /// coordinates and mirrored into the sim frame:
+    /// rot = LookRotation(hitNormal, parentUp) * LookRotation(srfAttachNode.orientation, up),
+    /// pos = hitPoint - rot * srfAttachNode.position (node position already * rescaleFactor).
+    /// `az_deg` is the azimuth of the surface normal about +Y in Unity coordinates.
+    pub fn surface_attach_editor(&mut self, parent: usize, def: PartDef, az_deg: f64, r: f64, y: f64, node_pos: V3, node_dir: V3) -> usize {
+        let a = az_deg.to_radians();
+        let n = v3(a.cos(), 0.0, a.sin());
+        let ppos = self.parts[parent].pos;
+        let hit_u = v3(-ppos.x, ppos.y + y, ppos.z) + n * r;
+        let rot_u = unity_look_rotation(n, v3(0.0, 1.0, 0.0)) * unity_look_rotation(node_dir.normalized(), v3(0.0, 1.0, 0.0));
+        let pos_u = hit_u - rot_u.rotate(node_pos);
+        let pos = v3(-pos_u.x, pos_u.y, pos_u.z);
+        let rot = Quat::new(rot_u.x, -rot_u.y, -rot_u.z, rot_u.w);
+        self.parts.push(Placed { def, pos, rot, stack: vec![] });
+        self.parts.len() - 1
+    }
+
+    /// The default lander, identical to the in-game harness craft (harness/make_crafts.py):
+    /// Mk1 pod / FL-T400 / LV-T45 Swivel, three LT-2 legs placed by the VAB surface-attach rule at
+    /// the tank's lower edge (0.9 m below its centre).
     pub fn hopper() -> Craft {
         use crate::parts::*;
         let mut c = Craft { parts: vec![Placed { def: mk1pod_v2(), pos: V3::ZERO, rot: Quat::IDENTITY, stack: vec![] }] };
         let tank = c.stack_below(0, fuel_tank_t400());
         let _eng = c.stack_below(tank, swivel());
+        // landingLeg1-2 node_attach (LT-2 cfg) * rescaleFactor 1.25
+        let np = v3(0.0, 0.4271562, 0.0632596) * 1.25;
+        let nd = v3(0.0, 0.5735765, 0.819152);
         for k in 0..3 {
-            c.surface_attach(tank, lt2_leg(), 90.0 + 120.0 * k as f64, 0.625, -0.6);
+            c.surface_attach_editor(tank, lt2_leg(), 90.0 + 120.0 * k as f64, 0.625, -0.9, np, nd);
         }
         c
     }
+}
+
+/// Unity `Quaternion.LookRotation(forward, up)` (+Z -> forward, +Y toward up; x = up x forward).
+pub fn unity_look_rotation(fwd: V3, up: V3) -> Quat {
+    let z = fwd.normalized();
+    let x = up.cross(z).normalized();
+    let y = z.cross(x);
+    let (m00, m11, m22) = (x.x, y.y, z.z);
+    let (m01, m02, m10, m12, m20, m21) = (y.x, z.x, x.y, z.y, x.z, y.z);
+    let tr = m00 + m11 + m22;
+    if tr > 0.0 {
+        let s = (tr + 1.0).sqrt() * 2.0;
+        Quat::new((m21 - m12) / s, (m02 - m20) / s, (m10 - m01) / s, 0.25 * s)
+    } else if m00 > m11 && m00 > m22 {
+        let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
+        Quat::new(0.25 * s, (m01 + m10) / s, (m02 + m20) / s, (m21 - m12) / s)
+    } else if m11 > m22 {
+        let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
+        Quat::new((m01 + m10) / s, 0.25 * s, (m12 + m21) / s, (m02 - m20) / s)
+    } else {
+        let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
+        Quat::new((m02 + m20) / s, (m12 + m21) / s, 0.25 * s, (m10 - m01) / s)
+    }
+    .normalized()
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -94,17 +141,7 @@ pub struct EngineSpec {
     pub dir: V3,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-#[repr(C)]
-pub struct LegSpec {
-    /// root-frame anchor (foot at full extension) and the suspension axis (unit, root frame, "down")
-    pub foot: V3,
-    pub axis: V3,
-    pub travel: f64,
-    pub spring_ratio: f64,
-    pub damper_ratio: f64,
-    pub crash_tolerance: f64,
-}
+pub use crate::wheel::LegSpec;
 
 /// Flat, `Copy` vessel description (mirrors 1:1 into a CUDA constant buffer).
 #[derive(Clone, Copy, Debug)]
@@ -242,8 +279,6 @@ impl VesselSpec {
                 }
                 s.engines[k] = es;
                 s.n_engines += 1;
-                // the nozzle tip is a hull point
-                s.add_hull(es.pos, d.crash_tolerance);
             }
             if let Some(w) = &d.reaction_wheel {
                 s.rw_torque += v3(w.pitch_torque, w.roll_torque, w.yaw_torque);
@@ -254,25 +289,36 @@ impl VesselSpec {
                 let k = s.n_legs as usize;
                 assert!(k < MAX_LEGS);
                 s.legs[k] = LegSpec {
-                    foot: p.pos + p.rot.rotate(l.foot),
-                    axis: p.rot.rotate(v3(0.0, -1.0, 0.0)),
-                    travel: l.suspension_distance,
+                    anchor: p.pos + p.rot.rotate(l.anchor),
+                    up: p.rot.rotate(v3(0.0, 1.0, 0.0)),
+                    fwd: p.rot.rotate(v3(0.0, 0.0, 1.0)),
+                    radius: l.radius,
+                    travel: l.travel,
+                    travel_cfg: l.travel_cfg,
                     spring_ratio: l.spring_ratio,
                     damper_ratio: l.damper_ratio,
+                    boost_ratio: l.boost_ratio,
+                    maximum_load: l.maximum_load,
+                    sprung_mass: d.mass,
                     crash_tolerance: d.crash_tolerance,
+                    min_down_force: 10.0,
                 };
                 s.n_legs += 1;
-            } else if d.engine.is_none() {
-                // stack parts: bottom ring corners + top centre as hull points
-                let half = d.cube.size * 0.5;
-                let c0 = p.pos + p.rot.rotate(d.cube.center);
-                for (dx, dz) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
-                    s.add_hull(c0 + p.rot.rotate(v3(dx * half.x, -half.y, dz * half.z)), d.crash_tolerance);
+            } else {
+                // hull points: a ring at each stack node (bottom ring sized like the part, smaller
+                // for an engine bell) and the top centre
+                let r = if d.engine.is_some() { 0.35 } else { 0.5 * d.cube.size.x.min(d.cube.size.z) };
+                if let Some((nb, _)) = d.node_bottom {
+                    for (dx, dz) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                        s.add_hull(p.pos + p.rot.rotate(nb + v3(dx * r, 0.0, dz * r)), d.crash_tolerance);
+                    }
                 }
-                s.add_hull(c0 + p.rot.rotate(v3(0.0, half.y, 0.0)), d.crash_tolerance);
+                if let Some((nt, _)) = d.node_top {
+                    s.add_hull(p.pos + p.rot.rotate(nt), d.crash_tolerance);
+                }
             }
         }
-        s.bottom_y = (0..s.n_legs as usize).map(|k| s.legs[k].foot.y).fold(f64::INFINITY, f64::min);
+        s.bottom_y = (0..s.n_legs as usize).map(|k| s.legs[k].foot().y).fold(f64::INFINITY, f64::min);
         for k in 0..s.n_hull as usize {
             s.bottom_y = s.bottom_y.min(s.hull[k].y);
         }
@@ -291,6 +337,14 @@ impl VesselSpec {
     /// resource fill fraction per resource.
     #[inline]
     pub fn mass_props(&self, res: &[f64; N_RES]) -> (f64, V3, [[f64; 3]; 3]) {
+        let (m, c, it, _) = self.mass_props_full(res);
+        (m, c, it)
+    }
+
+    /// Mass, CoM, total inertia about the CoM, and the sum of the parts' *own* inertias (all
+    /// root frame). total - own = the parallel-axis ("orbital") part, which in the game comes from
+    /// the joints between part rigidbodies.
+    pub fn mass_props_full(&self, res: &[f64; N_RES]) -> (f64, V3, [[f64; 3]; 3], [[f64; 3]; 3]) {
         let mut m_parts = [0.0; MAX_PARTS];
         let mut m = 0.0;
         let mut mc = V3::ZERO;
@@ -307,6 +361,7 @@ impl VesselSpec {
         }
         let com = mc / m;
         let mut it = [[0.0; 3]; 3];
+        let mut own = [[0.0; 3]; 3];
         for i in 0..self.n_parts as usize {
             let mi = m_parts[i];
             let d = self.part_com[i] - com;
@@ -316,11 +371,24 @@ impl VesselSpec {
             for a in 0..3 {
                 for b in 0..3 {
                     let delta = if a == b { d2 } else { 0.0 };
+                    own[a][b] += ir[a][b] * mi;
                     it[a][b] += ir[a][b] * mi + mi * (delta - dv[a] * dv[b]);
                 }
             }
         }
-        (m, com, it)
+        (m, com, it, own)
+    }
+
+    /// Part mass for a resource state (dry + its share of each resource).
+    #[inline]
+    pub fn part_mass(&self, i: usize, res: &[f64; N_RES]) -> f64 {
+        let mut mi = self.part_dry_mass[i];
+        for r in 0..N_RES {
+            if self.res_cap_total[r] > 0.0 {
+                mi += self.part_res_cap[i][r] * (res[r] / self.res_cap_total[r]) * RES_DENSITY[r];
+            }
+        }
+        mi
     }
 
     pub fn full_resources(&self) -> [f64; N_RES] {
@@ -345,6 +413,12 @@ mod tests {
         let (m, com, it) = s.mass_props(&s.full_resources());
         // 0.8 + 0.25 + 1.5 + 3*0.1 dry, + 400 units * 0.005 + 10 mono * 0.004
         assert!((m - (2.85 + 2.0 + 0.04)).abs() < 1e-12, "{m}");
+        // leg 0 placed exactly where the game put it (v2 harness craft, geometry dump):
+        // Unity root-local (0, -2.7695, 0.86648), rot (-0.300706, 0, 0, 0.953717)
+        let c = Craft::hopper();
+        let l0 = &c.parts[3];
+        assert!((l0.pos - v3(0.0, -2.7695012, 0.8664852)).norm() < 1e-5, "{:?}", l0.pos);
+        assert!((l0.rot.x + 0.3007059).abs() < 1e-5 && (l0.rot.w - 0.9537171).abs() < 1e-5);
         assert!((s.dry_mass() - 2.85).abs() < 1e-12);
         assert!(com.x.abs() < 1e-9 && com.z.abs() < 1e-9);
         assert!(it[0][0] > 0.0 && it[1][1] > 0.0 && it[2][2] > 0.0);

@@ -1,0 +1,8 @@
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/obj/Release/net472/SimHarness.csproj.AssemblyReference.cache
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/obj/Release/net472/SimHarness.GeneratedMSBuildEditorConfig.editorconfig
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/obj/Release/net472/SimHarness.csproj.CoreCompileInputs.cache
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/obj/Release/net472/SimHarness.sourcelink.json
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/bin/Release/net472/SimHarness.dll
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/bin/Release/net472/SimHarness.pdb
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/obj/Release/net472/SimHarness.dll
+/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/obj/Release/net472/SimHarness.pdb

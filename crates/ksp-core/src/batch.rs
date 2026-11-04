@@ -43,6 +43,7 @@ soa! {
     rw_in: V3, smooth_buf: [[f32; 3]; VEL_SMOOTH_LEN], smooth_idx: u8, vel_spiking: bool,
     last_vel_provisional: bool, last_vel: [f32; 3], last_vel_idx: u8, drift_frames: u8,
     status: u8, settled_ticks: u16, ticks: u32, impact_speed: f32, toff: f32,
+    legs: [crate::wheel::LegState; crate::vessel::MAX_LEGS],
 }
 
 // Raw column pointers are only dereferenced at disjoint indices (one env per task).
@@ -232,7 +233,7 @@ pub fn observe(spec: &VesselSpec, prm: &Params, st: &EnvState, mach: f32, qkpa: 
     let ground_r = prm.body.radius + prm.ground_alt;
     let mut low = f64::INFINITY;
     for k in 0..spec.n_legs as usize {
-        let p = st.x + st.q.rotate(spec.legs[k].foot);
+        let p = st.x + st.q.rotate(spec.legs[k].foot());
         low = low.min(p.norm() - ground_r);
     }
     if spec.n_legs == 0 {
@@ -243,8 +244,7 @@ pub fn observe(spec: &VesselSpec, prm: &Params, st: &EnvState, mach: f32, qkpa: 
     let legs = {
         let mut c = 0;
         for k in 0..spec.n_legs as usize {
-            let p = st.x + st.q.rotate(spec.legs[k].foot);
-            if p.norm() < ground_r {
+            if st.legs[k].grounded {
                 c += 1;
             }
         }

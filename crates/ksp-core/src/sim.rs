@@ -27,7 +27,8 @@ use crate::ksc;
 use crate::math::{v3, Quat, V3};
 use crate::orbit;
 use crate::parts::N_RES;
-use crate::vessel::{VesselSpec, MAX_ENGINES};
+use crate::vessel::{VesselSpec, MAX_ENGINES, MAX_LEGS};
+use crate::wheel::{self, LegState};
 
 /// Flight physics step: `Time.fixedDeltaTime` = 0.02 s (TimeWarp.updateRate, 1x physics warp).
 pub const FIXED_DT: f64 = 0.02;
@@ -39,6 +40,8 @@ pub const MAX_VEL_DELTA_SQR: f32 = 1e6;
 pub const MAX_ANGULAR_VELOCITY: f64 = 50.0;
 /// Ticks between refreshes of the sun/latitude temperature offset (sun moves 0.0003 deg/tick).
 pub const TEMP_OFFSET_TICKS: u32 = 25;
+/// `PSystemManager.MaximumSurfaceGeeASL`: max GeeASL over stock bodies with a solid surface (Eve).
+pub const MAX_SURFACE_GEE_ASL: f64 = 1.7005807760832998;
 /// Physics.cfg orbitDriftFramesToWait.
 pub const ORBIT_DRIFT_FRAMES_TO_WAIT: u8 = 5;
 
@@ -87,6 +90,7 @@ pub struct EnvState {
     pub impact_speed: f32,
     /// cached GetAtmoThermalStats temperature offset (K); NaN = recompute
     pub toff: f32,
+    pub legs: [LegState; MAX_LEGS],
 }
 
 /// Pilot input, as `FlightCtrlState` (mainThrottle, pitch, yaw, roll) in [0,1] / [-1,1].
@@ -274,7 +278,7 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     }
 
     // 1. mass stats / CoM
-    let (m, com_l, i_l) = spec.mass_props(&st.res);
+    let (m, com_l, i_l, i_own_l) = spec.mass_props_full(&st.res);
     info.mass = m;
     let r_com = st.q.rotate(com_l);
     let x_com = st.x + r_com;
@@ -322,9 +326,8 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         } else {
             st.flameout &= !(1 << k);
         }
-        // gimbal: pitch tilts thrust about root +X, yaw about root +Z; sign flips if the engine
-        // sits above the CoM (ModuleGimbal.GimbalRotation `s`), chosen to torque the same way
-        // as ModuleReactionWheel for the same input.
+        // gimbal (ModuleGimbal.GimbalRotation): pitch / yaw deflection = input * range, sign
+        // flipped when the engine sits above the CoM (`s`); roll only for off-axis engines.
         let sgn = if com_l.y > e.pos.y { 1.0 } else { -1.0 };
         let tgt = [sgn * ctl.pitch.clamp(-1.0, 1.0) * e.gimbal_range_deg, sgn * ctl.yaw.clamp(-1.0, 1.0) * e.gimbal_range_deg];
         for a in 0..2 {
@@ -335,7 +338,10 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 tgt[a]
             };
         }
-        let gq = Quat::angle_axis(st.gimbal[k][0], v3(1.0, 0.0, 0.0)) * Quat::angle_axis(st.gimbal[k][1], v3(0.0, 0.0, 1.0));
+        // measured in game (trace Ascent80): ModuleGimbal.actuation = (pitch, roll, yaw); pitch
+        // tilts the thrust toward root +Z by actuation.x * range, yaw toward the sim's root +X
+        // (Unity -X) by actuation.z * range.
+        let gq = Quat::angle_axis(st.gimbal[k][0], v3(1.0, 0.0, 0.0)) * Quat::angle_axis(-st.gimbal[k][1], v3(0.0, 0.0, 1.0));
         let dir_w = st.q.rotate(gq.rotate(e.dir));
         let f = dir_w * thrust;
         force += f;
@@ -356,8 +362,10 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         *ec -= got;
         let operational = sum > 0.0 && got >= 0.9 * ec_req;
         if operational {
-            // (pitch, roll, yaw) -> part-local (x, y, z); torque = rotation * -inputVector
-            torque += st.q.rotate(-st.rw_in);
+            // rw_in is Unity's inputVector (pitch, roll, yaw) on the part's Unity-local (x, y, z);
+            // the game applies torque = rotation * -inputVector in that left-handed frame. Torque
+            // is a pseudovector, so in the sim's x-mirrored frame it becomes (-x, +y, +z).
+            torque += st.q.rotate(v3(-st.rw_in.x, st.rw_in.y, st.rw_in.z));
         }
     }
 
@@ -367,7 +375,9 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     let a_frame = if rot_frame { -(omega.cross(v_com) * 2.0) - omega.cross(omega.cross(x_com)) } else { V3::ZERO };
 
     // 5. aerodynamics per part + angular drag
-    let mut ang_damp = 0.0;
+    // PhysX damps each part rigidbody's angular velocity (rb.angularDrag); for the rigid composite
+    // that removes sum_i c_i I_own_i w of angular momentum per unit time (root-frame matrix)
+    let mut damp_l = [[0.0f64; 3]; 3];
     if prm.aero && atm.rho > 0.0 {
         let mt = mach_terms(atm.mach);
         for i in 0..spec.n_parts as usize {
@@ -379,7 +389,14 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
                 continue;
             }
             let qp = atm.rho * 0.0005 * s2; // part dynamic pressure, kPa
-            ang_damp += spec.part_angular_drag[i] * (qp * KPA_TO_ATM) * crate::aero::ANGULAR_DRAG_MULTIPLIER * spec.part_dry_mass[i];
+            // FlightIntegrator.UpdateAerodynamics: rb.angularDrag = angularDrag * q_atm * multiplier
+            let ci = (spec.part_angular_drag[i] * (qp * KPA_TO_ATM) * crate::aero::ANGULAR_DRAG_MULTIPLIER).max(0.0);
+            let mi = spec.part_mass(i, &st.res);
+            for a in 0..3 {
+                for bb in 0..3 {
+                    damp_l[a][bb] += ci * mi * spec.part_inertia_root[i][a][bb];
+                }
+            }
             let vhat = vpart / s2.sqrt();
             let prot = st.q * spec.part_rot[i];
             let d = prot.conj().rotate(vhat);
@@ -420,7 +437,6 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
             let at = st.q.rotate(spec.part_cop[i]);
             torque += (at - r_com).cross(fp);
         }
-        ang_damp /= spec.dry_mass();
     }
 
     // world-frame inertia tensor and its inverse
@@ -458,45 +474,87 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
     if prm.ground && rot_frame {
         let rg = b.radius + prm.ground_alt;
         let g_mag = g.norm();
-        let n_legs = spec.n_legs.max(1) as f64;
+        let n_grounded = (0..spec.n_legs as usize).filter(|&k| st.legs[k].grounded).count() as u32;
+        let inp = wheel::SuspInputs {
+            vessel_mass: m,
+            landed: n_grounded > 0,
+            n_grounded,
+            gee_asl: b.gee_asl,
+            max_surface_gee_asl: MAX_SURFACE_GEE_ASL,
+            g_mag,
+            dt,
+        };
         for k in 0..spec.n_legs as usize {
             let l = &spec.legs[k];
-            let foot = st.x + st.q.rotate(l.foot);
-            let pen = rg - foot.norm();
-            if pen <= 0.0 {
-                continue;
-            }
-            legs += 1;
-            contact_any = true;
-            let n = foot.normalized();
-            let vf = v_com + st.w.cross(foot - x_com);
-            let vn = vf.dot(n);
-            st.impact_speed = st.impact_speed.max((-vn) as f32);
-            // ModuleWheelSuspension.SuspensionSpringUpdate: spring = springRatio * sprungMassGravity
-            // (sprung weight, kN); damper = sqrt(spring * damperRatio * fudge), fudge ~ 1 here.
-            // Boost/auto-spring terms of the KSP wheel are not modelled.
-            let kspring = l.spring_ratio * (m / n_legs) * g_mag;
-            let cdamp = (kspring * l.damper_ratio).sqrt().min(gain_cap(foot - x_com, n));
-            let mut fnorm = kspring * pen.min(l.travel) - cdamp * vn;
-            if pen > l.travel {
-                // bottomed out: stiff stop (crash if hit hard, LT-1 crashTolerance)
-                fnorm += 50.0 * kspring * (pen - l.travel) - 5.0 * cdamp * vn;
-                if -vn > l.crash_tolerance {
-                    st.status = STATUS_CRASHED;
+            let ls = &mut st.legs[k];
+            // ModuleWheelSuspension / VPWheelCollider (from last step's WheelHit)
+            wheel::update_spring(l, ls, &inp);
+            // Unity WheelCollider ray (PhysX step) from the current pose
+            let a = st.x + st.q.rotate(l.anchor);
+            let u = st.q.rotate(l.up);
+            let len = l.travel + l.radius;
+            // ray a - s u against the ground sphere |p| = rg
+            let au = a.dot(u);
+            let disc = au * au - (a.norm2() - rg * rg);
+            let s_hit = if disc >= 0.0 { au - disc.sqrt() } else { f64::INFINITY };
+            let hit = s_hit >= 0.0 && s_hit <= len;
+            if hit {
+                let p = a - u * s_hit;
+                let n = p.normalized();
+                let ndu = n.dot(u);
+                // VPP tire force from the previous step's load, at the current contact
+                if ls.grounded {
+                    let vf = v_com + st.w.cross(p - x_com);
+                    let vt = vf - n * vf.dot(n);
+                    let fw = st.q.rotate(l.fwd);
+                    let fwd = (fw - n * fw.dot(n)).normalized();
+                    let side = n.cross(fwd);
+                    let vloc = [vt.dot(side) as f32, vt.dot(fwd) as f32];
+                    let ca = (u.dot(side)).atan2(ndu);
+                    let load = ((ls.hit_force as f64) * ca.cos()).max(l.min_down_force) as f32;
+                    let mfac = (ls.hit_force.max(0.0) as f64 / g_mag) as f32;
+                    let fext = [-0.5 * mfac * vloc[0] / dt as f32, -0.5 * mfac * vloc[1] / dt as f32];
+                    let f = wheel::tire_force(vloc, fext, load);
+                    let sm = (10.0 * dt as f32).clamp(0.0, 1.0);
+                    ls.tire = [ls.tire[0] + (f[0] - ls.tire[0]) * sm, ls.tire[1] + (f[1] - ls.tire[1]) * sm];
+                    let ft = side * ls.tire[0] as f64 + fwd * ls.tire[1] as f64;
+                    force += ft;
+                    torque += (p - x_com).cross(ft);
+                } else {
+                    ls.tire = [0.0, 0.0];
                 }
-            }
-            let fnorm = fnorm.max(0.0);
-            let vt = vf - n * vn;
-            let vtn = vt.norm();
-            let ft = if vtn > 1e-9 {
-                let tdir = vt / vtn;
-                vt * (-(prm.friction * fnorm / vtn).min(gain_cap(foot - x_com, tdir) / n_legs))
+                // native suspension force (PhysX): jounce from full extension
+                let x = len - s_hit;
+                let x_prev = if ls.grounded { ls.x as f64 } else { 0.0 };
+                let fs = ls.k as f64 * (x - ls.target as f64 * l.travel) + ls.c as f64 * (x - x_prev) / dt;
+                let reported = fs * ndu;
+                let fc = n * reported;
+                force += fc;
+                torque += (p - x_com).cross(fc);
+                let vn = (v_com + st.w.cross(p - x_com)).dot(n);
+                st.impact_speed = st.impact_speed.max((-vn) as f32);
+                if x > l.travel {
+                    // piston bottomed out (piston collider): hard stop, leg breaks on a hard hit
+                    let pen = x - l.travel;
+                    let me = m_eff(p - x_com, n);
+                    let fh = (0.1 * me / (dt * dt) * pen - gain_cap(p - x_com, n) * vn).max(0.0);
+                    force += n * fh;
+                    torque += (p - x_com).cross(n * fh);
+                    if -vn > l.crash_tolerance {
+                        st.status = STATUS_CRASHED;
+                    }
+                }
+                ls.grounded = true;
+                ls.x = x as f32;
+                ls.hit_force = reported as f32;
+                legs += 1;
+                contact_any = true;
             } else {
-                V3::ZERO
-            };
-            let fc = n * fnorm + ft;
-            force += fc;
-            torque += (foot - x_com).cross(fc);
+                ls.grounded = false;
+                ls.x = 0.0;
+                ls.hit_force = 0.0;
+                ls.tire = [0.0, 0.0];
+            }
         }
         for k in 0..spec.n_hull as usize {
             let p = st.x + st.q.rotate(spec.hull[k]);
@@ -550,10 +608,40 @@ pub fn tick(spec: &VesselSpec, prm: &Params, st: &mut EnvState, ctl: &Control) -
         let vn = v_com + a * dt;
         (x_com + vn * dt, vn)
     };
-    // rotation: PhysX w += I^-1 tau dt, damping, clamp, then orientation
-    let alpha = mat_vec(&iw_inv, torque);
+    // rotation: rigid composite of PhysX bodies. PhysX integrates each body without its own
+    // gyroscopic term, but the joints enforce the parallel-axis inertia, whose gyroscopic torque
+    // -w x (I_orb w) does act; then per-body angular damping, clamp, orientation.
+    let to_world = |ml: &[[f64; 3]; 3]| {
+        let ex = st.q.rotate(v3(1.0, 0.0, 0.0));
+        let ey = st.q.rotate(v3(0.0, 1.0, 0.0));
+        let ez = st.q.rotate(v3(0.0, 0.0, 1.0));
+        let rm = [[ex.x, ey.x, ez.x], [ex.y, ey.y, ez.y], [ex.z, ey.z, ez.z]];
+        let mut o = [[0.0; 3]; 3];
+        for a in 0..3 {
+            for c in 0..3 {
+                let mut s = 0.0;
+                for k in 0..3 {
+                    for l in 0..3 {
+                        s += rm[a][k] * ml[k][l] * rm[c][l];
+                    }
+                }
+                o[a][c] = s;
+            }
+        }
+        o
+    };
+    let mut i_orb_l = i_l;
+    for a in 0..3 {
+        for c in 0..3 {
+            i_orb_l[a][c] -= i_own_l[a][c];
+        }
+    }
+    let i_orb_w = to_world(&i_orb_l);
+    let gyro = st.w.cross(mat_vec(&i_orb_w, st.w));
+    let alpha = mat_vec(&iw_inv, torque - gyro);
     let mut w = st.w + alpha * dt;
-    w = w * (1.0 - dt * ang_damp).max(0.0);
+    let damp_w = to_world(&damp_l);
+    w = w - mat_vec(&iw_inv, mat_vec(&damp_w, w)) * dt;
     let wn = w.norm();
     if wn > MAX_ANGULAR_VELOCITY {
         w = w * (MAX_ANGULAR_VELOCITY / wn);
@@ -661,7 +749,7 @@ pub fn state_at_pad(spec: &VesselSpec, enu: V3, v_enu: V3, q: Quat, w: V3, ut: f
     let res = spec.full_resources();
     let (_, com_l, _) = spec.mass_props(&res);
     let r = q.rotate(com_l);
-    let mut st = EnvState { ut, x: x_com - r, v: v_com - w.cross(r), q, w, res, toff: f32::NAN, ..Default::default() };
+    let mut st = EnvState { ut, x: x_com - r, v: v_com - w.cross(r), q, w, res, toff: f32::NAN, legs: [LegState::fresh(); MAX_LEGS], ..Default::default() };
     prime_smoother(&mut st, v_com);
     st
 }
@@ -672,8 +760,8 @@ pub fn state_landed(spec: &VesselSpec, ut: f64) -> EnvState {
     let q = attitude(u, n);
     let res = spec.full_resources();
     let (_, com_l, _) = spec.mass_props(&res);
-    let pen = (1.0 / spec.legs[0].spring_ratio).min(spec.legs[0].travel * 0.99);
-    let h = com_l.y - spec.bottom_y - pen;
+    // feet just touching; the legs then settle to their static compression
+    let h = com_l.y - spec.bottom_y - 0.02;
     let _ = e;
     let mut st = state_at_pad(spec, v3(0.0, 0.0, h), V3::ZERO, q, V3::ZERO, ut);
     st.status = STATUS_CONTACT;

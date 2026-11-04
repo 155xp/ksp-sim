@@ -56,11 +56,18 @@ pub struct ReactionWheelDef {
 
 #[derive(Clone, Copy, Debug)]
 pub struct LegDef {
-    /// foot (wheel-collider contact) point when fully extended, part-local
-    pub foot: V3,
-    pub suspension_distance: f64,
+    /// deployed wheel-collider transform position in the part frame (sim, x-mirrored); its up
+    /// axis is the part's +Y (deployTgt has identity rotation)
+    pub anchor: V3,
+    /// WheelCollider radius and suspensionDistance, both already * rescaleFactor
+    pub radius: f64,
+    pub travel: f64,
+    /// cfg suspensionDistance (unscaled; used by the auto springTweakable formula)
+    pub travel_cfg: f64,
     pub spring_ratio: f64,
     pub damper_ratio: f64,
+    pub boost_ratio: f64,
+    pub maximum_load: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -82,8 +89,9 @@ pub struct PartDef {
     pub leg: Option<LegDef>,
 }
 
+/// A PartDatabase cube line, converted to the sim's (x-mirrored) part frame.
 fn cube(line: &str) -> DragCube {
-    DragCube::parse(line).expect("bad cube").1
+    DragCube::parse(line).expect("bad cube").1.mirrored_x()
 }
 
 /// Mk1 Command Pod. Command/mk1pod_v2/mk1Pod_v2.cfg; cube PartDatabase.cfg (mk1pod_v2).
@@ -121,6 +129,26 @@ pub fn fuel_tank_t400() -> PartDef {
         node_top: Some((v3(0.0, 0.981725, 0.0), v3(0.0, 1.0, 0.0))),
         node_bottom: Some((v3(0.0, -0.9125, 0.0), v3(0.0, -1.0, 0.0))),
         resources: vec![(Res::LiquidFuel, 180.0, 180.0), (Res::Oxidizer, 220.0, 220.0)],
+        engine: None,
+        reaction_wheel: None,
+        leg: None,
+    }
+}
+
+/// FL-T800. FuelTank/Size1_Tanks/fuelTankT800.cfg; cube PartDatabase.cfg (fuelTank_long).
+pub fn fuel_tank_t800() -> PartDef {
+    PartDef {
+        name: "fuelTank_long",
+        mass: 0.5,
+        com_offset: V3::ZERO,
+        cop_offset: V3::ZERO,
+        angular_drag: 2.0,
+        crash_tolerance: 6.0,
+        body_lift: true,
+        cube: cube("Default, 4.779,0.7737,0.7165, 4.779,0.7737,0.7165, 1.213,0.9103,0.1733, 1.213,0.9103,0.1733, 4.779,0.7737,0.7165, 4.779,0.7737,0.7165, 0,-0.006252,5.074E-07, 1.25,3.818,1.25"),
+        node_top: Some((v3(0.0, 1.875, 0.0), v3(0.0, 1.0, 0.0))),
+        node_bottom: Some((v3(0.0, -1.8875, 0.0), v3(0.0, -1.0, 0.0))),
+        resources: vec![(Res::LiquidFuel, 360.0, 360.0), (Res::Oxidizer, 440.0, 440.0)],
         engine: None,
         reaction_wheel: None,
         leg: None,
@@ -211,17 +239,16 @@ pub fn lt1_leg() -> PartDef {
         resources: vec![],
         engine: None,
         reaction_wheel: None,
-        leg: Some(LegDef { foot: v3(0.0, -1.978, -0.16), suspension_distance: 0.75, spring_ratio: 30.0, damper_ratio: 2.2 }),
+        // wheel pose not measured in game for the LT-1 (approximate)
+        leg: Some(LegDef { anchor: v3(0.0, -0.6, 0.1), radius: 0.15, travel: 0.75 * 1.25, travel_cfg: 0.75, spring_ratio: 30.0, damper_ratio: 2.2, boost_ratio: 0.7, maximum_load: 40.0 }),
     }
 }
 
 /// LT-2 Landing Strut, deployed. Utility/landingLegLT-2/landingLegLT-2.cfg (CoMOffset 0,0,0.1;
 /// ModuleWheelSuspension suspensionDistance 0.95, springRatio 33, damperRatio 2.2);
 /// "Deployed" cube from PartDatabase.cfg (landingLeg1-2).
-/// Part-local frame as surface-attached (origin at the attach point): +Y up along the vessel, +Z
-/// into the parent. Foot point approximated from the deployed cube's lower extent
-/// (cube centre y -0.7179, size y 3.025, node_attach y 0.427 -> 2.66 m below the attach point)
-/// and ~0.45 m radial spread (the wheel collider itself lives in the model file).
+/// Wheel-collider geometry from the in-game dump; the part is placed with the VAB surface-attach
+/// rule (vessel.rs / harness/make_crafts.py).
 pub fn lt2_leg() -> PartDef {
     PartDef {
         name: "landingLeg1-2",
@@ -237,7 +264,9 @@ pub fn lt2_leg() -> PartDef {
         resources: vec![],
         engine: None,
         reaction_wheel: None,
-        leg: Some(LegDef { foot: v3(0.0, -2.66, -0.45), suspension_distance: 0.95, spring_ratio: 33.0, damper_ratio: 2.2 }),
+        // deployed WheelCollider measured in game (SimHarness geometry dump, ModuleWheelDeployment
+        // deployTgt): part-local (0, -0.835, 0.104), radius 0.12*1.25, travel 0.95*1.25
+        leg: Some(LegDef { anchor: v3(0.0, -0.835, 0.1039), radius: 0.15, travel: 1.1875, travel_cfg: 0.95, spring_ratio: 33.0, damper_ratio: 2.2, boost_ratio: 0.7, maximum_load: 40.0 }),
     }
 }
 
@@ -245,6 +274,7 @@ pub fn by_name(name: &str) -> Option<PartDef> {
     Some(match name {
         "mk1pod_v2" => mk1pod_v2(),
         "fuelTank" => fuel_tank_t400(),
+        "fuelTank_long" => fuel_tank_t800(),
         "liquidEngine2_v2" => swivel(),
         "liquidEngine3_v2" => terrier(),
         "landingLeg1" => lt1_leg(),
@@ -282,6 +312,7 @@ mod tests {
         let cases = [
             ("Command/mk1pod_v2/mk1Pod_v2.cfg", mk1pod_v2(), "Default"),
             ("FuelTank/Size1_Tanks/fuelTankT400.cfg", fuel_tank_t400(), "Default"),
+            ("FuelTank/Size1_Tanks/fuelTankT800.cfg", fuel_tank_t800(), "Default"),
             ("Engine/liquidEngineLV-T45_v2/liquidEngineLV-T45_v2.cfg", swivel(), "Clean"),
             ("Engine/liquidEngineLV-909_v2/liquidEngineLV-909_v2.cfg", terrier(), "Clean"),
             ("Utility/landingLegLT-1/landingLegLT-1.cfg", lt1_leg(), "Deployed"),
@@ -320,7 +351,7 @@ mod tests {
             }
             if let Some(l) = &def.leg {
                 let m = p.nodes_named("MODULE").find(|n| n.get("name") == Some("ModuleWheelSuspension")).unwrap();
-                assert_eq!(m.get_f64("suspensionDistance"), Some(l.suspension_distance));
+                assert_eq!(m.get_f64("suspensionDistance"), Some(l.travel_cfg));
                 assert_eq!(m.get_f64("springRatio"), Some(l.spring_ratio));
                 assert_eq!(m.get_f64("damperRatio"), Some(l.damper_ratio));
             }
@@ -329,7 +360,7 @@ mod tests {
                 || n.get("name") == Some(def.name)).and_then(|n| n.node("DRAG_CUBE").cloned());
             let dc = dc.expect(def.name);
             let found = dc.get_all("cube").filter_map(DragCube::parse).find(|(n, _)| n == cube_name).unwrap().1;
-            assert_eq!(found, def.cube, "{}", def.name);
+            assert_eq!(found.mirrored_x(), def.cube, "{}", def.name);
         }
     }
 }

@@ -1,0 +1,58 @@
+{
+  "format": 1,
+  "restore": {
+    "/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/SimHarness.csproj": {}
+  },
+  "projects": {
+    "/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/SimHarness.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/SimHarness.csproj",
+        "projectName": "SimHarness",
+        "projectPath": "/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/SimHarness.csproj",
+        "packagesPath": "/home/eric/.nuget/packages/",
+        "outputPath": "/home/eric/.t3/scratch/2026-11-04-this-continues-a-ksp-project-1e57caa4/ksp-sim/harness/plugin/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/home/eric/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net472"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net472": {
+            "targetAlias": "net472",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        }
+      },
+      "frameworks": {
+        "net472": {
+          "targetAlias": "net472",
+          "dependencies": {
+            "Microsoft.NETFramework.ReferenceAssemblies": {
+              "suppressParent": "All",
+              "target": "Package",
+              "version": "[1.0.3, )",
+              "autoReferenced": true
+            }
+          },
+          "runtimeIdentifierGraphPath": "/home/eric/.dotnet/sdk/8.0.427/RuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

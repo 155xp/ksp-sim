@@ -7,11 +7,14 @@
 //! An infinite tangent on either side makes the segment a step (holds the left value).
 //!
 //! Keys loaded from a cfg `key = t v` line (two values) go through `FloatCurve.Add(t, v)` ->
-//! `AnimationCurve.AddKey(time, value)` (FloatCurve.cs:67), which computes "smooth" tangents for
-//! the *newly inserted key only* (Unity `RecalculateSplineSlope(curve, index, bias = 0)`): first
-//! key -> slope to its right neighbour, last key -> slope from its left neighbour, interior ->
-//! mean of the two secant slopes. Previously inserted keys keep the slope they got when they were
-//! inserted. `key = t v in out` (four values) uses the explicit tangents (FloatCurve.cs:74).
+//! `AnimationCurve.AddKey(time, value)` (FloatCurve.cs:67). Unity keeps such keys in auto-tangent
+//! mode and re-derives their tangents whenever a neighbour is inserted, so in the finished curve
+//! every auto key has the "smooth" slope of its *final* neighbours: first key -> secant to the
+//! right neighbour, last key -> secant from the left one, interior -> mean of the two secants.
+//! Measured in game (harness trace Ascent80, LV-T45 realIsp vs part static pressure over
+//! 0.007..0.99 atm): this rule reproduces realIsp to 0.02 s RMS; the per-insertion rule
+//! (tangent fixed when the key is added) is off by up to 11 s. `key = t v in out` (four values)
+//! keeps its explicit tangents (FloatCurve.cs:74).
 //!
 //! Unity evaluates in f32; we evaluate in f64 (relative difference ~1e-7).
 
@@ -76,46 +79,66 @@ fn hermite(a: &Key, b: &Key, x: f64) -> f64 {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Curve {
     pub keys: Vec<Key>,
+    /// keys added with `AddKey(t, v)` (auto tangents, re-derived from neighbours)
+    pub auto: Vec<bool>,
 }
 
 impl Curve {
     pub fn from_keys(keys: &[Key]) -> Self {
-        Curve { keys: keys.to_vec() }
+        Curve { keys: keys.to_vec(), auto: vec![false; keys.len()] }
     }
 
-    /// `FloatCurve.Add(t, v)` -> `AnimationCurve.AddKey(t, v)` (smooth tangent on the new key).
+    /// `FloatCurve.Add(t, v)` -> `AnimationCurve.AddKey(t, v)`: an auto-tangent key.
     pub fn add_smooth(&mut self, t: f64, v: f64) {
-        let i = self.insert(k(t, v, 0.0, 0.0));
-        let n = self.keys.len();
-        if n < 2 {
-            return;
-        }
-        let ks = &self.keys;
-        let slope = |a: &Key, b: &Key| {
-            let dx = b.t - a.t;
-            if dx.abs() > 1e-12 { (b.v - a.v) / dx } else { 0.0 }
-        };
-        let m = if i == 0 {
-            slope(&ks[0], &ks[1])
-        } else if i == n - 1 {
-            slope(&ks[n - 2], &ks[n - 1])
-        } else {
-            0.5 * slope(&ks[i - 1], &ks[i]) + 0.5 * slope(&ks[i], &ks[i + 1])
-        };
-        self.keys[i].tin = m;
-        self.keys[i].tout = m;
+        self.insert(k(t, v, 0.0, 0.0), true);
+        self.update_auto_tangents();
     }
 
     /// `FloatCurve.Add(t, v, in, out)`.
     pub fn add(&mut self, t: f64, v: f64, tin: f64, tout: f64) {
-        self.insert(k(t, v, tin, tout));
+        self.insert(k(t, v, tin, tout), false);
+        self.update_auto_tangents();
     }
 
-    fn insert(&mut self, key: Key) -> usize {
+    fn insert(&mut self, key: Key, auto: bool) -> usize {
         // AnimationCurve.AddKey refuses a key at an existing time; KSP cfgs never do that.
         let i = self.keys.partition_point(|q| q.t < key.t);
         self.keys.insert(i, key);
+        self.auto.insert(i, auto);
         i
+    }
+
+    /// Smooth tangents for every auto key from its current neighbours.
+    fn update_auto_tangents(&mut self) {
+        let n = self.keys.len();
+        if n < 2 {
+            for (key, &a) in self.keys.iter_mut().zip(&self.auto) {
+                if a {
+                    key.tin = 0.0;
+                    key.tout = 0.0;
+                }
+            }
+            return;
+        }
+        let slope = |a: &Key, b: &Key| {
+            let dx = b.t - a.t;
+            if dx.abs() > 1e-12 { (b.v - a.v) / dx } else { 0.0 }
+        };
+        for i in 0..n {
+            if !self.auto[i] {
+                continue;
+            }
+            let ks = &self.keys;
+            let m = if i == 0 {
+                slope(&ks[0], &ks[1])
+            } else if i == n - 1 {
+                slope(&ks[n - 2], &ks[n - 1])
+            } else {
+                0.5 * slope(&ks[i - 1], &ks[i]) + 0.5 * slope(&ks[i], &ks[i + 1])
+            };
+            self.keys[i].tin = m;
+            self.keys[i].tout = m;
+        }
     }
 
     /// Parse the `key = ...` lines of a cfg curve block (as `FloatCurve.Load` does: split on
@@ -170,16 +193,18 @@ mod tests {
     }
 
     #[test]
-    fn smooth_tangents_are_insertion_order_dependent() {
-        // typical stock atmosphereCurve: "key = 0 345", "key = 1 290", "key = 9 0.001"
-        let c = Curve::from_cfg_lines(["0 345", "1 290", "9 0.001"]);
-        // first key was alone when inserted -> slope 0; second -> secant from first; third -> secant from second
-        assert_eq!(c.keys[0].tout, 0.0);
-        assert!((c.keys[1].tin - (-55.0)).abs() < 1e-12);
-        assert!((c.keys[2].tin - (0.001 - 290.0) / 8.0).abs() < 1e-12);
-        let mid = c.eval(0.5);
-        // h00*345 + h01*290 + h11*(-55): t=0.5 -> 0.5*345 + 0.5*290 - 0.125*(-55)
-        assert!((mid - (0.5 * 345.0 + 0.5 * 290.0 + 0.125 * 55.0)).abs() < 1e-9);
+    fn auto_tangents_use_final_neighbours() {
+        // LV-T45 atmosphereCurve: "key = 0 320", "key = 1 250", "key = 6 0.001"
+        let c = Curve::from_cfg_lines(["0 320", "1 250", "6 0.001"]);
+        let (s01, s12) = (-70.0, (0.001 - 250.0) / 5.0);
+        assert!((c.keys[0].tout - s01).abs() < 1e-12);
+        assert!((c.keys[1].tin - 0.5 * (s01 + s12)).abs() < 1e-12);
+        assert!((c.keys[2].tin - s12).abs() < 1e-12);
+        // in-game realIsp of the LV-T45 (harness trace Ascent80): 305.661 s at 0.1999 atm,
+        // 283.7119 s at 0.5001 atm, 262.691 s at 0.8001 atm
+        for (p, isp) in [(0.1999, 305.661), (0.5001, 283.7119), (0.8001, 262.691)] {
+            assert!((c.eval(p) - isp).abs() < 0.05, "{p}: {} vs {isp}", c.eval(p));
+        }
     }
 
     #[test]

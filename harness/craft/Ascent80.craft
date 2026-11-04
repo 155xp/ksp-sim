@@ -1,0 +1,122 @@
+ship = Ascent80
+version = 1.12.5
+description = ksp-sim harness craft
+type = VAB
+size = 3,8,3
+persistentId = 1234567
+rot = 0,0,0,1
+missionFlag = Squad/Flags/default
+vesselType = Lander
+PART
+{
+	part = mk1pod.v2_4294000000
+	partName = Part
+	persistentId = 1000
+	pos = 0.0,10.0,0.0
+	attPos = 0,0,0
+	attPos0 = 0.0,10.0,0.0
+	rot = 0.0,0.0,0.0,1.0
+	attRot = 0,0,0,1
+	attRot0 = 0.0,0.0,0.0,1.0
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = fuelTank.long_4294000001
+	attN = bottom,fuelTank.long_4294000001
+}
+PART
+{
+	part = fuelTank.long_4294000001
+	partName = Part
+	persistentId = 1001
+	pos = 0.0,7.7199621,0.0
+	attPos = 0,0,0
+	attPos0 = 0.0,7.7199621,0.0
+	rot = 0.0,0.0,0.0,1.0
+	attRot = 0,0,0,1
+	attRot0 = 0.0,0.0,0.0,1.0
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = fuelTank.long_4294000002
+	attN = top,mk1pod.v2_4294000000
+	attN = bottom,fuelTank.long_4294000002
+}
+PART
+{
+	part = fuelTank.long_4294000002
+	partName = Part
+	persistentId = 1002
+	pos = 0.0,3.9574621,0.0
+	attPos = 0,0,0
+	attPos0 = 0.0,3.9574621,0.0
+	rot = 0.0,0.0,0.0,1.0
+	attRot = 0,0,0,1
+	attRot0 = 0.0,0.0,0.0,1.0
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = liquidEngine2.v2_4294000003
+	attN = top,fuelTank.long_4294000001
+	attN = bottom,liquidEngine2.v2_4294000003
+}
+PART
+{
+	part = liquidEngine2.v2_4294000003
+	partName = Part
+	persistentId = 1003
+	pos = 0.0,2.0699620999999997,0.0
+	attPos = 0,0,0
+	attPos0 = 0.0,2.0699620999999997,0.0
+	rot = 0.0,0.0,0.0,1.0
+	attRot = 0,0,0,1
+	attRot0 = 0.0,0.0,0.0,1.0
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = 0
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	attN = top,fuelTank.long_4294000002
+}

@@ -1,0 +1,177 @@
+ship = HopperDrop2
+version = 1.12.5
+description = ksp-sim harness craft
+type = VAB
+size = 3,8,3
+persistentId = 1234567
+rot = 0,0,0,1
+missionFlag = Squad/Flags/default
+vesselType = Lander
+PART
+{
+	part = mk1pod.v2_4294000000
+	partName = Part
+	persistentId = 1000
+	pos = 0.0,10.0,0.0
+	attPos = 0,0,0
+	attPos0 = 0.0,10.0,0.0
+	rot = 0.0,0.0,0.0,1.0
+	attRot = 0,0,0,1
+	attRot0 = 0.0,0.0,0.0,1.0
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = fuelTank_4294000001
+	attN = bottom,fuelTank_4294000001
+}
+PART
+{
+	part = fuelTank_4294000001
+	partName = Part
+	persistentId = 1001
+	pos = 0.0,8.6132371,0.0
+	attPos = 0,0,0
+	attPos0 = 0.0,8.6132371,0.0
+	rot = 0.0,0.0,0.0,1.0
+	attRot = 0,0,0,1
+	attRot0 = 0.0,0.0,0.0,1.0
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	link = liquidEngine2.v2_4294000002
+	link = landingLeg1-2_4294000003
+	link = landingLeg1-2_4294000004
+	link = landingLeg1-2_4294000005
+	attN = top,mk1pod.v2_4294000000
+	attN = bottom,liquidEngine2.v2_4294000002
+}
+PART
+{
+	part = liquidEngine2.v2_4294000002
+	partName = Part
+	persistentId = 1002
+	pos = 0.0,7.7007371,0.0
+	attPos = 0,0,0
+	attPos0 = 0.0,7.7007371,0.0
+	rot = 0.0,0.0,0.0,1.0
+	attRot = 0,0,0,1
+	attRot0 = 0.0,0.0,0.0,1.0
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = 0
+	resPri = 0
+	dstg = 0
+	sidx = 0
+	sqor = -1
+	sepI = -1
+	attm = 0
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	attN = top,fuelTank_4294000001
+}
+PART
+{
+	part = landingLeg1-2_4294000003
+	partName = Part
+	persistentId = 1003
+	pos = 5.305686813279117e-17,7.230499505732873,0.8664844128075365
+	attPos = 0,0,0
+	attPos0 = 5.305686813279117e-17,7.230499505732873,0.8664844128075365
+	rot = -0.30070583648049565,2.919915991871933e-17,9.20646100326916e-18,0.953716939089668
+	attRot = 0,0,0,1
+	attRot0 = -0.30070583648049565,2.919915991871933e-17,9.20646100326916e-18,0.953716939089668
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 1
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	srfN = srfAttach,fuelTank_4294000001
+}
+PART
+{
+	part = landingLeg1-2_4294000004
+	partName = Part
+	persistentId = 1004
+	pos = -0.7503975134745688,7.230499505732873,-0.4332422064037682
+	attPos = 0,0,0
+	attPos0 = -0.7503975134745688,7.230499505732873,-0.4332422064037682
+	rot = 0.1503529182402478,0.8259430972711885,0.26041889345835856,-0.47685846954483396
+	attRot = 0,0,0,1
+	attRot0 = 0.1503529182402478,0.8259430972711885,0.26041889345835856,-0.47685846954483396
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 1
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	srfN = srfAttach,fuelTank_4294000001
+}
+PART
+{
+	part = landingLeg1-2_4294000005
+	partName = Part
+	persistentId = 1005
+	pos = 0.7503975134745686,7.230499505732873,-0.43324220640376865
+	attPos = 0,0,0
+	attPos0 = 0.7503975134745686,7.230499505732873,-0.43324220640376865
+	rot = -0.15035291824024774,0.8259430972711888,0.26041889345835867,0.4768584695448337
+	attRot = 0,0,0,1
+	attRot0 = -0.15035291824024774,0.8259430972711888,0.26041889345835867,0.4768584695448337
+	mir = 1,1,1
+	symMethod = Radial
+	autostrutMode = Grandparent
+	rigidAttachment = True
+	istg = -1
+	resPri = 0
+	dstg = 0
+	sidx = -1
+	sqor = -1
+	sepI = -1
+	attm = 1
+	modCost = 0
+	modMass = 0
+	modSize = 0,0,0
+	srfN = srfAttach,fuelTank_4294000001
+}

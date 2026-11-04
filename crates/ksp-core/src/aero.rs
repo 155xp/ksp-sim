@@ -108,6 +108,17 @@ impl DragCube {
         Some((tok[0].to_string(), c))
     }
 
+    /// The same cube expressed in the sim's right-handed part frame, which is Unity's left-handed
+    /// part frame mirrored in x (x -> -x): the +X and -X faces swap and the centre x flips.
+    pub fn mirrored_x(&self) -> DragCube {
+        let mut c = *self;
+        c.area.swap(0, 1);
+        c.drag.swap(0, 1);
+        c.depth.swap(0, 1);
+        c.center.x = -c.center.x;
+        c
+    }
+
     /// `SetDragWeights_List`: weight-normalised blend of several cubes.
     pub fn blend(cubes: &[(f64, DragCube)]) -> DragCube {
         let wsum: f64 = cubes.iter().map(|(w, _)| *w).sum();
