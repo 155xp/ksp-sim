@@ -8,6 +8,9 @@
 //! `ApplyAeroLift` (:5938). Curves and multipliers: Physics.cfg (values transcribed below, checked
 //! against the install by `physics_cfg_matches_install`).
 
+// Curve keys are Physics.cfg literals (sin(AoA) values to 7 digits), not approximated constants.
+#![allow(clippy::approx_constant)]
+
 use crate::curve::{eval, k, Key};
 use crate::math::{v3, V3};
 

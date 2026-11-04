@@ -27,6 +27,9 @@
 //!   +x -> (lat 0, lon 0), +y -> (lat 0, lon +90 E), +z -> north pole (spin axis).
 //!   A Unity body-local vector u maps to it as u.xzy.
 
+// Serialized f32 quaternion components (e.g. 0.7071068286895752) are exact asset values, not 1/sqrt(2).
+#![allow(clippy::approx_constant)]
+
 use crate::math::{v3, Quat, V3};
 
 // ---------------------------------------------------------------------------------------------
