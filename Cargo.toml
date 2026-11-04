@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["crates/ksp-core", "crates/ksp-py"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "LicenseRef-Private"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+inherits = "release"

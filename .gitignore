@@ -1,0 +1,10 @@
+# Decompiled KSP code and extracted game data: local reference only, never commit (KSP EULA)
+/decomp/
+/extracted/
+/ksp_data_local/
+target/
+__pycache__/
+*.pyd
+*.so
+.venv/
+*.egg-info/
