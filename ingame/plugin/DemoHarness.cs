@@ -143,7 +143,10 @@ namespace DemoHarness
                         mode = "chase";
                         break;
                     case "ground":
-                        gLat = H.D(f[1]); gLon = H.D(f[2]); gAlt = H.D(f[3]);
+                        gLat = H.D(f[1]); gLon = H.D(f[2]);
+                        // "+h": h metres above KSP's terrain there (CelestialBody.TerrainAltitude)
+                        gAlt = f[3].StartsWith("+") && v != null ? v.mainBody.TerrainAltitude(gLat, gLon) + H.D(f[3].Substring(1)) : H.D(f[3]);
+                        H.Log("cam: ground alt " + gAlt.ToString("F1"));
                         blendDur = f.Length > 4 ? (float)H.D(f[4]) : 0f;
                         StartBlend(cam, v);
                         mode = "ground";
@@ -214,7 +217,7 @@ namespace DemoHarness
             }
             float dd = (float)off.magnitude;
             // telephoto tracking: keep about zoomSpan metres across the frame height
-            float ft = zoomSpan > 0 ? Mathf.Clamp(2f * Mathf.Atan(zoomSpan * 0.5f / Mathf.Max(dd, 1f)) * Mathf.Rad2Deg, 6f, 60f) : fovTarget;
+            float ft = zoomSpan > 0 ? Mathf.Clamp(2f * Mathf.Atan(zoomSpan * 0.5f / Mathf.Max(dd, 1f)) * Mathf.Rad2Deg, 2f, 60f) : fovTarget;
             fov = Mathf.Lerp(fov, ft, Mathf.Clamp01(dt * 2.5f));
             // every frame: KSP's own camera update resets the cameras' fieldOfView
             cam.SetFoV(fov);

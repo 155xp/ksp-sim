@@ -375,3 +375,41 @@ kOS `SHIP:CONTROL` inputs.
    `thrustTransforms[0]` per tick (`e0_dir` / `e0_pos`), so per-nozzle `localRotation` columns
    would make each nozzle's deflection directly checkable.
 4. **Descent** at −2 m/s to touchdown, then the end-of-test dump.
+
+## Heavy booster: sim Monte Carlo, in-game validation hop, in-game flights (ingame-demo)
+
+Craft (`guidance/core/src/ingame.rs::heavy_craft`, `ingame/make_demo_craft.py --heavy`): Mk7 nose /
+RC-L01 / large reaction wheel / Z-4K / ADTP-2-3 / S3-14400 / S3-7200 / Mammoth, six LT-2 legs on
+the S3-7200 offset 2.4 m below it beside the Mammoth (feet 0.43 m below the nozzle exits), eight
+airbrakes 3.0 m above the S3-14400 centre. 155.5 t full, 32.5 t dry; flown at 60 % propellant
+(106.3 t at liftoff).
+
+Guidance profile (MC-tuned, booster only): ascent capped at TWR 1.8, pitch-over scale 90 km,
+MECO when the propellant left is 2x the predicted return need (budget planned at the 0.7 ignition
+fraction), long-aim 2 % of downrange, airbrakes out at boostback cutoff, landing burn ignition at
+0.3 of the stop throttle (earlier and gentler: time to divert), touchdown 1.5 m/s; if still > 40 m
+off the pad at 100 m above it, descend vertically and land where it is. Without the TWR cap and
+margin the light booster flew to 45 km / 1950 m/s / 370 km apogee (unmodelled reentry heating).
+
+Sim (nominal ascent; thrust error ~2 %, drag error ~5 %, separation kicks, time of day varied):
+
+| run | landed | miss p50 / p90 / p99 / max (m) | touchdown vz p99 / max (m/s) |
+|---|---|---|---|
+| 2000 flights | 2000 | 0.75 / 0.99 / 1.27 / 1.58 | 1.65 / 1.78 |
+| 1000 through the bridge mapping (`MC_BRIDGE`) | 1000 | 0.72 / 0.94 / 1.20 / 1.43 | 1.65 / 1.70 |
+| 1000, drag error x2 | 1000 | 0.76 / 1.14 / 1.43 / 1.59 | 1.65 / 1.72 |
+
+The ~0.7 m median is a systematic offset along the approach (west): the final ZEM/ZEV segment is
+deliberately slow for this slow-turning craft (time to go floored at 3 attitude swings).
+
+In-game validation hop (`BRIDGE_HOP=1`, trace flight_20261104_184826; `guidance/core/examples/trace_check.rs`):
+settle, climb to 15 m, hover with pitch / yaw / roll steps, 1.5 m/s descent. Game vs ksp-core,
+airborne 33 s: one-step CoM acceleration error median 1.5e-4 / p95 2.1e-3 m/s^2, angular 8e-5 /
+2e-3 rad/s^2; 1-s open-loop windows max 1.8 mm, 0.065 deg; touchdown on the same tick, 2.4 mm.
+Mass and CoM identical; inertia diag game (2359, 182, 2353) vs repo craft (2402, 261, 2408) t m^2
+(roll axis 43 % high in the transcription: open item, no effect on the windows).
+
+In-game flights through the bridge (three takes, identical to the cm): separation 21.1 km at
+~455 m/s vertical, boostback, apogee ~38 km, two burns, landing burn from ~2 km; touchdown 1.27-1.34
+m/s vertical, tilt 0.08 deg, CoM at rest 0.70 m from the pad centre (e -0.69, n -0.05), as the sim
+predicts. Not validated in game yet: Mach > 0.8 airbrake drag (the descent peaks ~Mach 1.9 at 20 km).

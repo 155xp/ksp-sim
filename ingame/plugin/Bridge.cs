@@ -190,7 +190,7 @@ namespace DemoHarness
         // ---- camera director: phase + height driven, cinematic defaults ----------------------------
         // ground positions (lat, lon, alt ASL) around the pad (deck 72.45 m ASL)
         const string CamLiftoff = "ground -0.1155 -74.5637 84 0";   // ~190 m S, 65 m W, low
-        const string CamApproach = "ground -0.1110 -74.5640 88 0";  // ~145 m S, 70 m W
+        const string CamApproach = "ground -0.0492 -74.6057 +3 0";  // ~700 m NW of the pad, 3 m above the terrain: side-on telephoto
         const string CamPad = "ground -0.1003 -74.5600 78 0";       // ~33 m S, 25 m W, deck level
         int stage = -1;
         int boostbacks;
@@ -213,7 +213,7 @@ namespace DemoHarness
                 case 1: Cam("fov 55"); Cam("chase 205 -12 130 4"); break;          // chase from below-side, plume in frame
                 case 2: Cam("fov 50"); Cam("chase 165 8 95 4 1.5"); break;         // side view: flip and boostback burn
                 case 3: Cam("fov 50"); Cam("chase 250 50 90 5"); break;             // over the shoulder, ground below
-                case 4: Cam(CamApproach); Cam("zoom 110"); break;                  // cut: telephoto from the ground
+                case 4: Cam(CamApproach); Cam("zoom 70"); break;                   // cut: telephoto from the ground
                 case 5: Cam(CamPad); Cam("zoom 70"); break;                        // cut: close pad shot for touchdown
             }
             H.Log("bridge: camera stage " + stage + " at h " + h.ToString("F0"));
