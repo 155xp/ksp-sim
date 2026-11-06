@@ -4,10 +4,11 @@ A headless, batched re-implementation of **stock Kerbal Space Program 1.12.5** f
 (build 3190) for RL / autonomous-landing research: many environments stepped per call from a
 Rust core (struct-of-arrays state, rayon), with a gym-style Python API and a CUDA path.
 
-Private repo: the physics was learned by mod-level reading of the decompiled game (kept local in the
-git-ignored `decomp/`), and the sim is written from scratch, citing the KSP class/method each piece
-re-implements. Game data needed at build time (body prefab fields, Physics.cfg curves, part stats,
-drag cubes) is transcribed with tests that re-read the local install; see DESIGN.md.
+The physics was learned by mod-level reading of the decompiled game (kept local in the
+git-ignored `decomp/`; nothing decompiled ships in this repo). The sim is written from scratch,
+citing the KSP class/method each piece re-implements. Game data needed at build time (body prefab
+fields, Physics.cfg curves, part stats, drag cubes) is transcribed with tests that re-read a local
+install; see DESIGN.md.
 
 ## Layout
 
